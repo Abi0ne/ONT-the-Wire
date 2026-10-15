@@ -64,7 +64,7 @@ public final class SpeedTest {
     static let warmUp: TimeInterval = 2
     static let pingSamples = 10
 
-    public var streams = 16
+    public var streams = 8
     public private(set) var phase: Phase = .idle
     public private(set) var result: SpeedTestResult?
     /// Aggregate speed over the last second of the running phase.

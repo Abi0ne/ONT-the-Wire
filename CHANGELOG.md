@@ -1,5 +1,10 @@
 # Novità
 
+## 0.1.1 — non ancora pubblicata
+
+- La finestra si apre a 1000 × 615 punti (minimo 960 di larghezza): il risultato del test di velocità resta leggibile senza andare a capo.
+- Il test di velocità parte con 8 flussi.
+
 ## 0.1.0 — 15 ottobre 2026
 
 Prima versione pubblica.

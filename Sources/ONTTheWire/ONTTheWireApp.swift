@@ -9,10 +9,10 @@ struct ONTTheWireApp: App {
     var body: some Scene {
         Window("ONT The Wire", id: "main") {
             ContentView(controller: appDelegate.controller)
-                .frame(minWidth: 800, minHeight: 600)
+                .frame(minWidth: 960, minHeight: 600)
                 .updateAlert(appDelegate.updater, controller: appDelegate.controller)
         }
-        .defaultSize(width: 920, height: 660)
+        .defaultSize(width: 1000, height: 615)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {

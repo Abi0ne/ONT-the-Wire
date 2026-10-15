@@ -125,7 +125,7 @@ Tutti i valori si possono selezionare e copiare.
 
 Si trova sotto il riepilogo ed è disponibile solo a sessione **connessa**. Il traffico esce sempre dall'interfaccia PPP, anche se "connessione principale" è spenta.
 
-1. Scegli il numero di **flussi paralleli**: **8**, **16** (predefinito) o **32**.
+1. Scegli il numero di **flussi paralleli**: **8** (predefinito), **16** o **32**.
 2. Premi **Avvia**. Puoi fermarlo in qualunque momento con **Interrompi**.
 
 Le fasi:
@@ -139,7 +139,7 @@ Le fasi:
 
 Il risultato riporta anche la **ripartizione per server** (ad esempio `Cloudflare 48% · Apple CDN 41% · OVH 11%`) ed eventuali **avvisi**, come un server che non ha risposto. Il risultato viene scritto anche nel log.
 
-**Come scegliere i flussi**: con un solo flusso TCP non si satura una linea FTTH veloce. Inizia con 16. Se il risultato è sotto il profilo commerciale, riprova con 32: se sale, il limite era il numero di connessioni e non la linea.
+**Come scegliere i flussi**: con un solo flusso TCP non si satura una linea FTTH veloce. Parti da 8. Se il risultato è sotto il profilo commerciale, riprova con 16 e poi con 32: se sale, il limite era il numero di connessioni e non la linea.
 
 ## 10. Log
 
