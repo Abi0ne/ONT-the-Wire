@@ -1,6 +1,6 @@
 # Manuale d'uso di ONT The Wire
 
-Versione 0.1.0
+Versione 0.1.1
 
 ## Indice
 
@@ -41,7 +41,7 @@ ONT The Wire trasforma il Mac nel router di una linea FTTH. Colleghi il Mac alla
 
 ## 3. Installazione
 
-1. Scarica `ONT-The-Wire-0.1.0.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
+1. Scarica `ONT-The-Wire-0.1.1.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
 2. Apri il DMG e trascina **ONT The Wire** sulla cartella **Applicazioni**.
 3. Apri l'app da Applicazioni.
 
