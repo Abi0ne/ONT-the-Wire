@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var controller: ConnectionController
+    let navigation: Navigation
 
     var body: some View {
         HStack(spacing: 0) {
@@ -11,7 +12,7 @@ struct ContentView: View {
 
             Divider()
 
-            SessionColumn(controller: controller)
+            SessionColumn(controller: controller, navigation: navigation)
                 .frame(minWidth: 380, maxWidth: .infinity)
         }
     }
@@ -121,11 +122,12 @@ private struct SettingsColumn: View {
 
 private struct SessionColumn: View {
     let controller: ConnectionController
-    // @AppStorage rather than @State: with Command Line Tools only, the
-    // SwiftUIMacros plugin behind the macOS 26 SDK's @State is unavailable.
-    @AppStorage("sessionTab") private var tab: Tab = .summary
+    // Tab state lives in Navigation rather than @State: with Command Line
+    // Tools only, the SwiftUIMacros plugin behind the macOS 26 SDK's @State
+    // is unavailable.
+    @Bindable var navigation: Navigation
 
-    private enum Tab: String { case summary, log }
+    private typealias Tab = Navigation.SessionTab
 
     private var inputsLocked: Bool {
         controller.state.isBusy || controller.state.isSessionActive
@@ -140,7 +142,7 @@ private struct SessionColumn: View {
 
             actions
 
-            Picker("", selection: $tab) {
+            Picker("", selection: $navigation.sessionTab) {
                 Text("Riepilogo").tag(Tab.summary)
                 Text(logTabTitle).tag(Tab.log)
             }
@@ -148,7 +150,7 @@ private struct SessionColumn: View {
             .labelsHidden()
 
             Group {
-                switch tab {
+                switch navigation.sessionTab {
                 case .summary:
                     ScrollView {
                         VStack(spacing: 14) {

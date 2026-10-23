@@ -8,7 +8,7 @@ struct ONTTheWireApp: App {
 
     var body: some Scene {
         Window("ONT The Wire", id: "main") {
-            RootView(controller: appDelegate.controller, phone: appDelegate.phone)
+            RootView(controller: appDelegate.controller, phone: appDelegate.phone, navigation: appDelegate.navigation)
                 .frame(minWidth: 960, minHeight: 600)
                 .updateAlert(appDelegate.updater, controller: appDelegate.controller)
         }
@@ -33,24 +33,38 @@ struct ONTTheWireApp: App {
     }
 }
 
+/// Section and tabs on screen. Kept only while the app runs: every launch
+/// opens on the PPPoE connection, and the SIP Caller on its tests.
+@MainActor
+@Observable
+final class Navigation {
+    enum Section { case pppoe, sip }
+    enum SessionTab { case summary, log }
+    enum SIPTab { case tests, log, trace }
+
+    var section = Section.pppoe
+    var sessionTab = SessionTab.summary
+    var sipTab = SIPTab.tests
+}
+
 /// The two sections of the window, switched from the toolbar.
 private struct RootView: View {
     let controller: ConnectionController
     let phone: SIPPhone
-    @AppStorage("section") private var section: Section = .pppoe
+    @Bindable var navigation: Navigation
 
-    private enum Section: String { case pppoe, sip }
+    private typealias Section = Navigation.Section
 
     var body: some View {
         Group {
-            switch section {
-            case .pppoe: ContentView(controller: controller)
-            case .sip: SIPCallerView(phone: phone, controller: controller)
+            switch navigation.section {
+            case .pppoe: ContentView(controller: controller, navigation: navigation)
+            case .sip: SIPCallerView(phone: phone, controller: controller, navigation: navigation)
             }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Picker("Sezione", selection: $section) {
+                Picker("Sezione", selection: $navigation.section) {
                     Label("Connessione PPPoE", systemImage: "cable.connector").tag(Section.pppoe)
                     Label("SIP Caller", systemImage: "phone").tag(Section.sip)
                 }
@@ -66,6 +80,7 @@ private struct RootView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = ConnectionController()
     lazy var phone = SIPPhone()
+    let navigation = Navigation()
     lazy var updater = Updater(log: controller.log)
 
     func applicationDidFinishLaunching(_ notification: Notification) {

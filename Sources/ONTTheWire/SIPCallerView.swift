@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct SIPCallerView: View {
     @Bindable var phone: SIPPhone
     let controller: ConnectionController
+    let navigation: Navigation
 
     var body: some View {
         HStack(spacing: 0) {
@@ -16,7 +17,7 @@ struct SIPCallerView: View {
 
             Divider()
 
-            SIPTestColumn(phone: phone)
+            SIPTestColumn(phone: phone, navigation: navigation)
                 .frame(minWidth: 380, maxWidth: .infinity)
         }
         .onAppear { phone.refreshLinks() }
@@ -49,7 +50,7 @@ private struct SIPAccountColumn: View {
                     .foregroundStyle(.secondary)
             } else {
                 Picker("Provider", selection: $phone.selectedTemplateID) {
-                    Text("Nessuno (manuale)").tag(String?.none)
+                    Text("Seleziona…").tag(String?.none)
                     ForEach(phone.templates.templates) { template in
                         Text(template.name).tag(Optional(template.id))
                     }
@@ -84,7 +85,9 @@ private struct SIPAccountColumn: View {
 
     private var templateFooter: String {
         guard let template = phone.template else {
-            return "Importa il file del provider esportato da 3CX, oppure compila i campi a mano."
+            return phone.templates.templates.isEmpty
+                ? "Importa il file del provider esportato da 3CX, oppure compila i campi a mano."
+                : "Scegli il provider per compilare server e porta, oppure compila i campi a mano."
         }
         var parts = ["\(template.registrarHost):\(template.registrarPort)"]
         if let proxy = template.proxyHost { parts.append("proxy \(proxy):\(template.proxyPort ?? 5060)") }
@@ -105,7 +108,7 @@ private struct SIPAccountColumn: View {
             SecureField("Password", text: $phone.password, prompt: Text("password SIP"))
             TextField("Server SIP", text: $phone.server, prompt: Text("es. voip.provider.it"))
                 .autocorrectionDisabled()
-            TextField("Porta", text: $phone.portText, prompt: Text("5060"))
+            TextField("Porta", text: $phone.portText, prompt: Text("es. 5060"))
                 .onChange(of: phone.portText) { _, newValue in
                     let digits = String(newValue.filter(\.isNumber).prefix(5))
                     if digits != newValue { phone.portText = digits }
@@ -175,9 +178,9 @@ private struct SIPAccountColumn: View {
 
 private struct SIPTestColumn: View {
     @Bindable var phone: SIPPhone
-    @AppStorage("sipTab") private var tab: Tab = .tests
+    @Bindable var navigation: Navigation
 
-    private enum Tab: String { case tests, log, trace }
+    private typealias Tab = Navigation.SIPTab
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -188,8 +191,8 @@ private struct SIPTestColumn: View {
 
             registrationActions
 
-            Picker("", selection: $tab) {
-                Text("Prove").tag(Tab.tests)
+            Picker("", selection: $navigation.sipTab) {
+                Text("Test").tag(Tab.tests)
                 Text(phone.log.entries.isEmpty ? "Log" : "Log (\(phone.log.entries.count))").tag(Tab.log)
                 Text("Traccia SIP").tag(Tab.trace)
             }
@@ -197,7 +200,7 @@ private struct SIPTestColumn: View {
             .labelsHidden()
 
             Group {
-                switch tab {
+                switch navigation.sipTab {
                 case .tests:
                     ScrollView {
                         VStack(spacing: 14) {

@@ -117,6 +117,7 @@ Il supervisore di una singola sessione.
 
 - **Template**: dal file 3CX si leggono `RegistrarHost/Port`, `ProxyHost/Port`, `TransportRestriction`, `IPRestriction`, `TimeBetweenRegistration`, la presenza di `3wayauthenticationid` (Auth ID distinto) e i codec. Le regole `ParameterIn/Out` e le altre opzioni di instradamento di 3CX non servono al test e vengono ignorate. Una copia del file va in `~/Library/Application Support/ONT The Wire/SIP templates`.
 - **Trasporto**: solo UDP, con un socket BSD sulla porta 5060 (5062/5064 o una libera se occupata). Con una rete scelta il socket è legato all'interfaccia con `IP_BOUND_IF`; in automatico segue la route principale. Le richieste vanno sempre al server (proxy in uscita), le risposte all'indirizzo di provenienza della richiesta (RFC 3581).
+- **Identificazione**: `User-Agent` (nelle richieste) e `Server` (nelle risposte) valgono `MANXX Validator <CFBundleShortVersionString>`.
 - **Ritrasmissioni**: timer RFC 3261 (T1 500 ms raddoppiato, 4 s per le non-INVITE, timeout 32 s). Il 200 OK di una chiamata in entrata viene ritrasmesso fino all'ACK.
 - **Autenticazione**: a un 401/407 la richiesta viene ripetuta una volta con `Authorization`/`Proxy-Authorization` digest (MD5, MD5-sess, SHA-256, qop `auth`).
 - **NAT**: se `received`/`rport` del Via nel 200 OK del REGISTER differiscono dall'indirizzo locale, il Contact (e l'SDP) passa all'indirizzo pubblico e la registrazione viene ripetuta. Poi parte un keep-alive CRLF ogni 25 s. L'RTP è simmetrico: l'audio va all'indirizzo da cui arrivano i pacchetti.

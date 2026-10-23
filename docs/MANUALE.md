@@ -1,6 +1,6 @@
 # Manuale d'uso di ONT The Wire
 
-Versione 0.2.0
+Versione 0.2.1
 
 ## Indice
 
@@ -43,7 +43,7 @@ ONT The Wire trasforma il Mac nel router di una linea FTTH. Colleghi il Mac alla
 
 ## 3. Installazione
 
-1. Scarica `ONT-The-Wire-0.2.0.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
+1. Scarica `ONT-The-Wire-0.2.1.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
 2. Apri il DMG e trascina **ONT The Wire** sulla cartella **Applicazioni**.
 3. Apri l'app da Applicazioni.
 
@@ -169,9 +169,9 @@ La sezione **SIP Caller** (in alto nella barra della finestra, accanto a **Conne
 I dati del server si importano da un **template di provider SIP trunk esportato da 3CX** (file `.xml`, tipo `gateway-template`):
 
 1. premi il pulsante di importazione (freccia in giù) accanto a **Template 3CX** e scegli uno o più file;
-2. il provider compare nel menu **Provider**: sceglilo per compilare **Server SIP** e **Porta**.
+2. il provider compare nel menu **Provider**: sceglilo per compilare **Server SIP** e **Porta**. A ogni avvio il menu parte da **Seleziona…** e tutti i campi sono vuoti.
 
-I template restano disponibili ai successivi avvii, perché non contengono credenziali. Il cestino rimuove il template selezionato. Senza template puoi scegliere **Nessuno (manuale)** e compilare server e porta a mano.
+I template restano disponibili ai successivi avvii, perché non contengono credenziali. Il cestino rimuove il template selezionato. Senza template lascia **Seleziona…** e compila server e porta a mano.
 
 Sotto il menu compaiono i parametri del provider: registrar e porta, eventuale proxy, trasporto, intervallo di registrazione e codec.
 
@@ -195,7 +195,7 @@ Dietro un router (Wi‑Fi o cavo di casa), l'app ricava l'indirizzo pubblico dal
 
 ### Registrazione
 
-Premi **Registra**. Lo stato in alto diventa **Registrato** con la rete usata e l'intervallo di rinnovo; l'app rinnova la registrazione da sola. **Deregistra** cancella la registrazione dal server (anche alla chiusura dell'app).
+Premi **Registra**. Lo stato in alto diventa **Registrato** con la rete usata e l'intervallo di rinnovo; l'app rinnova la registrazione da sola. Sul server l'app compare come **MANXX Validator** seguito dalla versione (ad esempio `MANXX Validator 0.2.0`): è il nome che vedi nei pannelli del provider che mostrano il dispositivo registrato, come l'advisor di WiC. **Deregistra** cancella la registrazione dal server (anche alla chiusura dell'app).
 
 ### Chiamata in uscita
 
@@ -209,7 +209,7 @@ Premi **Attendi chiamata** e chiama il numero della linea da un altro telefono. 
 
 Al termine di ogni prova il riquadro **Esito** mostra direzione, risposta, durata, codec (G.711 A-law o µ-law), pacchetti audio RTP inviati e ricevuti, livello di picco ricevuto e indirizzo remoto dell'audio. Se la chiamata è stata risposta ma **nessun pacchetto audio** è arrivato, l'esito lo segnala: di solito è un firewall o un NAT che blocca l'RTP.
 
-La scheda **Log** riassume le prove; **Traccia SIP** mostra i messaggi SIP completi (copiabili), con le risposte digest nascoste.
+La scheda **Test** (quella iniziale) contiene le chiamate di prova e l'esito; **Log** riassume le prove; **Traccia SIP** mostra i messaggi SIP completi (copiabili), con le risposte digest nascoste.
 
 ### Messaggi del SIP Caller
 

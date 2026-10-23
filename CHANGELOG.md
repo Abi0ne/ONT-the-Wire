@@ -1,5 +1,11 @@
 # Novità
 
+## 0.2.1 — 23 ottobre 2026
+
+- All'avvio l'app si apre sempre sulla sezione **Connessione PPPoE**.
+- **SIP Caller**: nessun template preselezionato (menu su **Seleziona…**) e campi vuoti, porta compresa; la scheda **Prove** si chiama ora **Test** ed è quella iniziale.
+- Il SIP Caller si presenta al server come **MANXX Validator** con la versione dell'app (header `User-Agent`), così il monitor del provider, ad esempio l'advisor di WiC, mostra chi è registrato sulla linea.
+
 ## 0.2.0 — 23 ottobre 2026
 
 - **SIP Caller**: nuova sezione per verificare una linea VoIP. Importa i template di provider SIP trunk esportati da 3CX e li propone in un menu; con numero, Auth ID e password si registra sul server, poi fa una chiamata di prova in uscita e risponde a una in entrata, entrambe con test eco (due toni, poi la tua voce). Funziona su qualsiasi rete del Mac (PPPoE, Wi‑Fi, Ethernet), anche dietro NAT. Esito con pacchetti RTP e livello audio, log e traccia SIP completa.

@@ -77,7 +77,9 @@ public final class SIPPhone {
     public static let ringTimeout: TimeInterval = 60
     public static let incomingWait: TimeInterval = 180
     static let answerDelay: Duration = .seconds(2)
-    static let userAgent = "ONT The Wire/\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev")"
+    /// User-Agent / Server of every SIP message: the provider's trunk monitor
+    /// (e.g. WiC's advisor) shows it as the device registered on the line.
+    static let userAgent = "MANXX Validator \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev")"
 
     public let templates: SIPTemplateStore
     public let log: LogStore
@@ -91,7 +93,7 @@ public final class SIPPhone {
     public var authID = ""
     public var password = ""
     public var server = ""
-    public var portText = "5060"
+    public var portText = ""
     /// BSD name of the network to use; nil: the Mac's primary route.
     public var networkInterface: String?
     public var destination = ""
@@ -133,8 +135,6 @@ public final class SIPPhone {
     public init(templates: SIPTemplateStore? = nil, log: LogStore? = nil) {
         self.templates = templates ?? SIPTemplateStore()
         self.log = log ?? LogStore()
-        selectedTemplateID = self.templates.templates.first?.id
-        applyTemplate()
         refreshLinks()
     }
 
@@ -179,7 +179,7 @@ public final class SIPPhone {
         guard let template else { return }
         templates.remove(template)
         log.info("Template SIP “\(template.name)” rimosso.")
-        selectedTemplateID = templates.templates.first?.id
+        selectedTemplateID = nil
     }
 
     public func clearTrace() { trace.removeAll() }
@@ -192,8 +192,14 @@ public final class SIPPhone {
 
     private func applyTemplate() {
         guard let template else {
+            // Back to "Seleziona…": an empty form for manual entry.
             codecs = RTPCodec.preferred(by: [])
             requestedExpiry = 300
+            server = ""
+            portText = ""
+            number = ""
+            authID = ""
+            password = ""
             return
         }
         server = template.proxyHost ?? template.registrarHost
