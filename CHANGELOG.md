@@ -1,5 +1,9 @@
 # Novità
 
+## 0.2.0 — 23 ottobre 2026
+
+- **SIP Caller**: nuova sezione per verificare una linea VoIP. Importa i template di provider SIP trunk esportati da 3CX e li propone in un menu; con numero, Auth ID e password si registra sul server, poi fa una chiamata di prova in uscita e risponde a una in entrata, entrambe con test eco (due toni, poi la tua voce). Funziona su qualsiasi rete del Mac (PPPoE, Wi‑Fi, Ethernet), anche dietro NAT. Esito con pacchetti RTP e livello audio, log e traccia SIP completa.
+
 ## 0.1.1 — 15 ottobre 2026
 
 - La finestra si apre a 1000 × 615 punti (minimo 960 di larghezza): il risultato del test di velocità resta leggibile senza andare a capo.

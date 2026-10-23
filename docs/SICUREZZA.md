@@ -23,6 +23,13 @@ Gli script e il relay eseguiti come root stanno dentro il bundle dell'app, che a
 - Per avviare `pppd` l'app scrive un file `secret` (`user` e `password`, quotati per `pppd`) con permessi **0600**, in una cartella di sessione **0700** dentro la cartella temporanea dell'utente. Il supervisore root lo **sposta** subito in `/var/run/ontthewire.XXXXXX`, leggibile solo da root, cancella l'originale e rimuove la copia alla fine della sessione.
 - Le credenziali non compaiono nella riga di comando di `pppd` (sarebbero visibili con `ps`) e non vengono mai scritte nel log dell'app. `pppd` è avviato con `debug`, ma non registra le password CHAP né PAP.
 
+### SIP Caller
+
+- Numero, Auth ID e password SIP stanno **solo in memoria**, come le credenziali PPPoE.
+- La password non viaggia in rete: il server riceve solo la risposta digest. Nella **Traccia SIP** anche la risposta digest è nascosta, così la traccia si può condividere.
+- I **template 3CX** importati vengono salvati in `~/Library/Application Support/ONT The Wire/SIP templates`: contengono solo i dati pubblici del provider, mai credenziali.
+- Il SIP Caller non usa privilegi di amministratore: gira con l'account dell'utente.
+
 ## Aggiornamenti automatici
 
 - A ogni avvio l'app legge `https://api.github.com/repos/Abi0ne/ONT-the-Wire/releases/latest`. La richiesta non invia identificativi né dati dell'utente oltre a un `User-Agent` fisso.
@@ -38,6 +45,7 @@ Gli script e il relay eseguiti come root stanno dentro il bundle dell'app, che a
 ## Rete
 
 - Il test di velocità contatta solo Cloudflare (`speed.cloudflare.com`), Apple (`mensura.cdn-apple.com`) e OVH (`proof.ovh.net`), e solo quando lo avvii.
+- Il SIP Caller contatta solo il server SIP indicato nel template o a mano, e solo quando premi **Registra**. Le chiamate di prova vanno ai numeri che scegli tu.
 - L'app non invia telemetria.
 
 ## Segnalare un problema di sicurezza

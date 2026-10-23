@@ -8,7 +8,7 @@ struct ONTTheWireApp: App {
 
     var body: some Scene {
         Window("ONT The Wire", id: "main") {
-            ContentView(controller: appDelegate.controller)
+            RootView(controller: appDelegate.controller, phone: appDelegate.phone)
                 .frame(minWidth: 960, minHeight: 600)
                 .updateAlert(appDelegate.updater, controller: appDelegate.controller)
         }
@@ -33,9 +33,39 @@ struct ONTTheWireApp: App {
     }
 }
 
+/// The two sections of the window, switched from the toolbar.
+private struct RootView: View {
+    let controller: ConnectionController
+    let phone: SIPPhone
+    @AppStorage("section") private var section: Section = .pppoe
+
+    private enum Section: String { case pppoe, sip }
+
+    var body: some View {
+        Group {
+            switch section {
+            case .pppoe: ContentView(controller: controller)
+            case .sip: SIPCallerView(phone: phone, controller: controller)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Sezione", selection: $section) {
+                    Label("Connessione PPPoE", systemImage: "cable.connector").tag(Section.pppoe)
+                    Label("SIP Caller", systemImage: "phone").tag(Section.sip)
+                }
+                .pickerStyle(.segmented)
+                .labelStyle(.titleAndIcon)
+                .labelsHidden()
+            }
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = ConnectionController()
+    lazy var phone = SIPPhone()
     lazy var updater = Updater(log: controller.log)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -60,8 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard controller.needsTerminationWork else { return .terminateNow }
+        guard controller.needsTerminationWork || phone.needsShutdown else { return .terminateNow }
         Task {
+            // Unregister first, while the PPPoE link may still carry it.
+            await phone.shutdown()
             await controller.prepareForTermination()
             sender.reply(toApplicationShouldTerminate: true)
         }

@@ -1,6 +1,6 @@
 # Manuale d'uso di ONT The Wire
 
-Versione 0.1.1
+Versione 0.2.0
 
 ## Indice
 
@@ -15,10 +15,11 @@ Versione 0.1.1
 9. [Test di velocità](#9-test-di-velocità)
 10. [Log](#10-log)
 11. [Disconnessione e chiusura](#11-disconnessione-e-chiusura)
-12. [Aggiornamenti](#12-aggiornamenti)
-13. [Messaggi di errore e soluzioni](#13-messaggi-di-errore-e-soluzioni)
-14. [Verifiche da Terminale](#14-verifiche-da-terminale)
-15. [Domande frequenti](#15-domande-frequenti)
+12. [SIP Caller](#12-sip-caller)
+13. [Aggiornamenti](#13-aggiornamenti)
+14. [Messaggi di errore e soluzioni](#14-messaggi-di-errore-e-soluzioni)
+15. [Verifiche da Terminale](#15-verifiche-da-terminale)
+16. [Domande frequenti](#16-domande-frequenti)
 
 ## 1. A cosa serve
 
@@ -27,7 +28,8 @@ ONT The Wire trasforma il Mac nel router di una linea FTTH. Colleghi il Mac alla
 - verificare che la linea autentichi e riceva un indirizzo IP, senza router del cliente;
 - vedere quale concentratore (BRAS) risponde e con quale Session ID;
 - misurare la velocità reale della linea con un test multi-flusso;
-- raccogliere un log completo della negoziazione da allegare a una segnalazione.
+- raccogliere un log completo della negoziazione da allegare a una segnalazione;
+- verificare una linea VoIP: registrazione SIP e chiamate di prova in uscita e in entrata (sezione **SIP Caller**).
 
 ## 2. Cosa serve
 
@@ -41,7 +43,7 @@ ONT The Wire trasforma il Mac nel router di una linea FTTH. Colleghi il Mac alla
 
 ## 3. Installazione
 
-1. Scarica `ONT-The-Wire-0.1.1.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
+1. Scarica `ONT-The-Wire-0.2.0.dmg` da [GitHub Releases](https://github.com/Abi0ne/ONT-the-Wire/releases/latest).
 2. Apri il DMG e trascina **ONT The Wire** sulla cartella **Applicazioni**.
 3. Apri l'app da Applicazioni.
 
@@ -158,7 +160,72 @@ Da qui puoi copiare tutto il log per allegarlo a una segnalazione. Le credenzial
 - **Chiudendo l'app** con una sessione attiva, l'app disconnette prima di uscire.
 - Se l'app si chiude in modo anomalo, il supervisore della sessione se ne accorge e chiude tutto da solo: nessuna configurazione resta appesa sul Mac.
 
-## 12. Aggiornamenti
+## 12. SIP Caller
+
+La sezione **SIP Caller** (in alto nella barra della finestra, accanto a **Connessione PPPoE**) verifica che un numero VoIP funzioni davvero: si registra sul server SIP del provider, chiama un numero e risponde a una chiamata, controllando l'audio in entrambe le direzioni. È sempre disponibile e non richiede la sessione PPPoE.
+
+### Template 3CX
+
+I dati del server si importano da un **template di provider SIP trunk esportato da 3CX** (file `.xml`, tipo `gateway-template`):
+
+1. premi il pulsante di importazione (freccia in giù) accanto a **Template 3CX** e scegli uno o più file;
+2. il provider compare nel menu **Provider**: sceglilo per compilare **Server SIP** e **Porta**.
+
+I template restano disponibili ai successivi avvii, perché non contengono credenziali. Il cestino rimuove il template selezionato. Senza template puoi scegliere **Nessuno (manuale)** e compilare server e porta a mano.
+
+Sotto il menu compaiono i parametri del provider: registrar e porta, eventuale proxy, trasporto, intervallo di registrazione e codec.
+
+### Account
+
+- **Numero / ID**: il numero della linea (utente SIP).
+- **Auth ID**: l'utente per l'autenticazione, se diverso dal numero. Vuoto: si usa il numero. Se il template lo prevede (3-way authentication di 3CX), sotto i campi compare un promemoria.
+- **Password**: la password SIP.
+- **Server SIP** e **Porta**: compilati dal template, modificabili.
+
+Come per il PPPoE, le credenziali **non vengono salvate**.
+
+### Rete
+
+Il test funziona su qualsiasi connessione del Mac:
+
+- **Automatica**: la rete principale del Mac (se il PPPoE è la connessione principale, passa da lì);
+- una rete precisa: **PPPoE** (`ppp0`, quando la sessione di ONT The Wire è attiva), **Wi‑Fi**, **Ethernet**…
+
+Dietro un router (Wi‑Fi o cavo di casa), l'app ricava l'indirizzo pubblico dalla risposta del server, si registra di nuovo con quell'indirizzo e tiene aperta la porta sul router con un messaggio ogni 25 s. Il PPPoE di solito ha un indirizzo pubblico e non ne ha bisogno.
+
+### Registrazione
+
+Premi **Registra**. Lo stato in alto diventa **Registrato** con la rete usata e l'intervallo di rinnovo; l'app rinnova la registrazione da sola. **Deregistra** cancella la registrazione dal server (anche alla chiusura dell'app).
+
+### Chiamata in uscita
+
+Scrivi il numero da chiamare (ad esempio il tuo cellulare) e premi **Chiama**. Quando rispondi senti **due toni** e poi **la tua voce in eco**: se ti senti, l'audio passa in entrambe le direzioni. La chiamata si chiude da sola dopo 60 secondi, oppure con **Riaggancia**. Se nessuno risponde entro 60 secondi la chiamata viene annullata.
+
+### Chiamata in entrata
+
+Premi **Attendi chiamata** e chiama il numero della linea da un altro telefono. L'app risponde dopo circa due secondi con lo stesso test eco. L'attesa dura al massimo 3 minuti.
+
+### Esito
+
+Al termine di ogni prova il riquadro **Esito** mostra direzione, risposta, durata, codec (G.711 A-law o µ-law), pacchetti audio RTP inviati e ricevuti, livello di picco ricevuto e indirizzo remoto dell'audio. Se la chiamata è stata risposta ma **nessun pacchetto audio** è arrivato, l'esito lo segnala: di solito è un firewall o un NAT che blocca l'RTP.
+
+La scheda **Log** riassume le prove; **Traccia SIP** mostra i messaggi SIP completi (copiabili), con le risposte digest nascoste.
+
+### Messaggi del SIP Caller
+
+| Messaggio | Causa probabile | Cosa fare |
+| --- | --- | --- |
+| **Il server SIP … non risponde** | Server o porta sbagliati, oppure la rete blocca UDP 5060 | Controlla server e porta; prova un'altra rete (ad esempio il PPPoE) |
+| **Credenziali rifiutate (401/407)** | Auth ID o password errati | Ricontrolla Auth ID (spesso diverso dal numero) e password |
+| **Registrazione rifiutata (403)** | Credenziali errate o registrazione ammessa solo da certi indirizzi IP | Verifica con il provider; prova dalla linea del cliente (PPPoE) |
+| **Account sconosciuto al server (404)** | Numero / ID errato | Ricontrolla il numero |
+| **Chiamata non autorizzata (403)** | Chiamate uscenti non abilitate o numero non consentito | Verifica il profilo della linea |
+| **Codec non accettato dal provider (488)** | Il provider vuole solo G.729 | L'app usa G.711: chiedi al provider di abilitarlo |
+| **Nessun audio ricevuto dall'altra parte** | RTP bloccato da firewall o NAT | Prova sul PPPoE o disattiva il SIP ALG del router |
+
+Il firewall di macOS, se attivo, al primo uso può chiedere di consentire le connessioni in entrata a ONT The Wire: consentile, altrimenti le chiamate in entrata non arrivano.
+
+## 13. Aggiornamenti
 
 A ogni avvio l'app controlla su GitHub se esiste una versione più recente. Se c'è:
 
@@ -173,7 +240,7 @@ Puoi controllare anche a mano dal menu **ONT The Wire › Controlla aggiornament
 
 Se sei senza Internet (ad esempio in campo con il solo ONT collegato), il controllo non va a buon fine senza disturbare. Rimane solo una riga nel log.
 
-## 13. Messaggi di errore e soluzioni
+## 14. Messaggi di errore e soluzioni
 
 | Messaggio | Causa probabile | Cosa fare |
 | --- | --- | --- |
@@ -196,7 +263,7 @@ Se sei senza Internet (ad esempio in campo con il solo ONT collegato), il contro
 - Controlla la **latenza sotto carico**: se sale di centinaia di ms, la linea o la rete dell'operatore è congestionata.
 - Guarda gli **avvisi** del test: se un server non ha risposto, il totale è stato raccolto dagli altri.
 
-## 14. Verifiche da Terminale
+## 15. Verifiche da Terminale
 
 A sessione connessa:
 
@@ -214,7 +281,7 @@ pgrep -l pppd; pgrep -l pppoe-relay    # nessun processo
 route -n get default                   # di nuovo l'interfaccia abituale
 ```
 
-## 15. Domande frequenti
+## 16. Domande frequenti
 
 **Devo creare la VLAN in Impostazioni di Sistema?**
 No. L'app costruisce da sola i frame con il tag 802.1Q e non cambia la configurazione di rete di macOS.

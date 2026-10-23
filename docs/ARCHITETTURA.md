@@ -93,6 +93,11 @@ Il supervisore di una singola sessione.
 | `Network/InterfaceCatalog.swift` | Elenco degli adattatori e stato del link via `SCDynamicStore`, aggiornato a ogni collegamento o scollegamento |
 | `SpeedTest/SpeedTest.swift` | Test di velocità multi-flusso |
 | `Update/Updates.swift`, `Update/Updater.swift` | Aggiornamenti firmati da GitHub Releases |
+| `SIP/SIPTemplate.swift`, `SIP/SIPTemplateStore.swift` | Lettura dei template 3CX (`gateway-template`, tipo `provider`) e copie importate |
+| `SIP/SIPPhone.swift` | User agent SIP su UDP: registrazione, chiamate di prova, transazioni e dialoghi |
+| `SIP/SIPMessage.swift`, `SIP/SIPDigest.swift`, `SIP/SDP.swift` | Messaggi SIP, autenticazione digest (MD5/SHA-256), SDP |
+| `SIP/RTPStream.swift`, `SIP/G711.swift` | Audio RTP del test eco, codifica G.711 |
+| `SIP/UDPSocket.swift` | Socket UDP legati a un'interfaccia (`IP_BOUND_IF`), elenco delle reti |
 
 ## Test di velocità
 
@@ -107,6 +112,16 @@ Il supervisore di una singola sessione.
 | OVH (`proof.ovh.net`) | `/files/1Gb.dat` | — | 2 (oltre risponde HTTP 429) |
 
 - Ogni flusso che finisce il proprio oggetto ne apre subito un altro. La latenza sotto carico viene campionata ogni 400 ms.
+
+## SIP Caller
+
+- **Template**: dal file 3CX si leggono `RegistrarHost/Port`, `ProxyHost/Port`, `TransportRestriction`, `IPRestriction`, `TimeBetweenRegistration`, la presenza di `3wayauthenticationid` (Auth ID distinto) e i codec. Le regole `ParameterIn/Out` e le altre opzioni di instradamento di 3CX non servono al test e vengono ignorate. Una copia del file va in `~/Library/Application Support/ONT The Wire/SIP templates`.
+- **Trasporto**: solo UDP, con un socket BSD sulla porta 5060 (5062/5064 o una libera se occupata). Con una rete scelta il socket è legato all'interfaccia con `IP_BOUND_IF`; in automatico segue la route principale. Le richieste vanno sempre al server (proxy in uscita), le risposte all'indirizzo di provenienza della richiesta (RFC 3581).
+- **Ritrasmissioni**: timer RFC 3261 (T1 500 ms raddoppiato, 4 s per le non-INVITE, timeout 32 s). Il 200 OK di una chiamata in entrata viene ritrasmesso fino all'ACK.
+- **Autenticazione**: a un 401/407 la richiesta viene ripetuta una volta con `Authorization`/`Proxy-Authorization` digest (MD5, MD5-sess, SHA-256, qop `auth`).
+- **NAT**: se `received`/`rport` del Via nel 200 OK del REGISTER differiscono dall'indirizzo locale, il Contact (e l'SDP) passa all'indirizzo pubblico e la registrazione viene ripetuta. Poi parte un keep-alive CRLF ogni 25 s. L'RTP è simmetrico: l'audio va all'indirizzo da cui arrivano i pacchetti.
+- **Audio**: G.711 A-law o µ-law (`telephone-event` offerto), 20 ms per pacchetto. Due toni a 1 kHz, poi eco dei pacchetti ricevuti (al massimo 0,5 s in coda). Si contano i pacchetti e il picco in dBFS.
+- **Limiti**: niente TCP/TLS, SRTP, G.729, STUN o IPv6; la chiamata di prova dura al massimo 60 s.
 
 ## Stati della connessione
 

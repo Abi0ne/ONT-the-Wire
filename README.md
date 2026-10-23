@@ -10,6 +10,7 @@ App macOS per collegare il Mac **direttamente a un ONT FTTH** con un adattatore 
 - **Riepilogo della sessione**: concentratore (AC-Name e MAC), Session ID, interfaccia PPP, indirizzo IP, gateway e DNS.
 - **Connessione principale** (facoltativa): route predefinita e DNS passano dal PPPoE anche con il Wi-Fi attivo.
 - **Test di velocità multi-flusso** in stile Ookla: ping e jitter, poi download e upload aggregati su 8, 16 o 32 connessioni parallele verso Cloudflare, Apple CDN e OVH, con la latenza sotto carico.
+- **SIP Caller**: registrazione di un account SIP da template 3CX e chiamate di prova in uscita e in entrata con test eco, su qualsiasi rete del Mac.
 - **Log** dettagliato della negoziazione: PADI/PADO/PADR/PADS, LCP, CHAP/PAP, IPCP e codici di uscita di pppd tradotti in italiano.
 - **Una sola autorizzazione** di amministratore per ogni avvio dell'app.
 - **Nessun dato salvato**: a ogni avvio i campi sono vuoti. Credenziali e impostazioni non finiscono né su disco né nel Portachiavi.
