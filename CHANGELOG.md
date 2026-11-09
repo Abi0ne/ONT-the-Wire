@@ -1,5 +1,11 @@
 # Novità
 
+## 0.3.0 — 9 novembre 2026
+
+- **PPPoE molto più veloce**: l'app gestisce da sé il protocollo PPP (LCP, PAP/CHAP, IPCP) e porta il traffico su un'interfaccia `utun`, senza più `pppd`. Prima il passaggio dei dati attraverso un pty limitava la sessione a circa 350 Mbit/s; ora il download supera i 900 Mbit/s su una linea da 1 Gbit/s.
+- Nel riepilogo l'interfaccia della sessione è `utun<N>` invece di `ppp0`.
+- A fine sessione il Log riporta le statistiche dei pacchetti (inviati, ricevuti, code piene, scarti), utili per capire dove si perde velocità.
+
 ## 0.2.1 — 23 ottobre 2026
 
 - All'avvio l'app si apre sempre sulla sezione **Connessione PPPoE**.

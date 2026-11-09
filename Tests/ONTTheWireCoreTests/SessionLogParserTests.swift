@@ -21,32 +21,35 @@ struct SessionLogParserTests {
         #expect(SessionLogParser.parseRelayLine("11:20:47 pppoe-relay: STATUS padt inviato, sessione 19247 chiusa") == nil)
     }
 
-    @Test func pppdAuthenticationFailure() {
+    @Test func pppAuthenticationFailure() {
         let lines = [
-            "Thu Oct 15 11:20:43 2026 : Using interface ppp0",
-            "pppoe-relay: STATUS session 19247 ac=02:00:5e:10:20:30",
-            "Thu Oct 15 11:20:46 2026 : rcvd [CHAP Challenge id=0x1 <4f77f3b6>, name = \"BRAS-ESEMPIO-01\"]",
-            "Thu Oct 15 11:20:47 2026 : rcvd [CHAP Failure id=0x1 \"\"]",
-            "Thu Oct 15 11:20:47 2026 : CHAP authentication failed",
-            "Thu Oct 15 11:20:47 2026 : Connection terminated.",
+            "11:20:44 pppoe-relay: LCP aperto: MRU del server 1492, autenticazione CHAP",
+            "11:20:44 pppoe-relay: STATUS auth CHAP",
+            "11:20:47 pppoe-relay: STATUS auth-failed ",
+            "11:20:47 pppoe-relay: STATUS padt inviato, sessione 19247 chiusa",
         ]
-        #expect(lines.compactMap(SessionLogParser.parsePPPDLine) == [
-            .linkInterface("ppp0"), .authenticating(method: "CHAP"), .authenticationFailed, .terminated,
+        #expect(lines.compactMap(SessionLogParser.parseRelayLine) == [
+            .authenticating(method: "CHAP"), .authenticationFailed,
         ])
     }
 
-    @Test func pppdAddresses() {
+    @Test func pppAddresses() {
         let lines = [
-            "Thu Oct 15 12:00:00 2026 : CHAP authentication succeeded",
-            "Thu Oct 15 12:00:01 2026 : local  IP address 79.1.2.3",
-            "Thu Oct 15 12:00:01 2026 : remote IP address 192.168.100.1",
-            "Thu Oct 15 12:00:01 2026 : primary   DNS address 85.37.17.12",
-            "Thu Oct 15 12:00:01 2026 : secondary DNS address 85.38.28.84",
-            "Thu Oct 15 12:30:00 2026 : No response to 4 echo-requests",
+            "12:00:00 pppoe-relay: STATUS auth-ok",
+            "12:00:01 pppoe-relay: STATUS interface utun7 mtu=1492",
+            "12:00:01 pppoe-relay: STATUS local 79.1.2.3",
+            "12:00:01 pppoe-relay: STATUS remote 192.168.100.1",
+            "12:00:01 pppoe-relay: STATUS dns 85.37.17.12",
+            "12:00:01 pppoe-relay: STATUS dns 85.38.28.84",
+            "12:00:01 pppoe-relay: STATUS up utun7 local=79.1.2.3 remote=192.168.100.1 dns=85.37.17.12,85.38.28.84",
+            "12:30:00 pppoe-relay: STATUS echo-timeout nessuna risposta a 4 LCP echo",
+            "12:30:00 pppoe-relay: STATUS lcp-terminated dal server",
+            "12:30:00 pppoe-relay: STATUS stats ricevuti 120, inviati 80; invio: coda piena 3 volte, scartati 0",
         ]
-        #expect(lines.compactMap(SessionLogParser.parsePPPDLine) == [
-            .authenticated, .localAddress("79.1.2.3"), .remoteAddress("192.168.100.1"),
-            .dnsServer("85.37.17.12"), .dnsServer("85.38.28.84"), .echoTimeout,
+        #expect(lines.compactMap(SessionLogParser.parseRelayLine) == [
+            .authenticated, .linkInterface("utun7"), .localAddress("79.1.2.3"), .remoteAddress("192.168.100.1"),
+            .dnsServer("85.37.17.12"), .dnsServer("85.38.28.84"), .echoTimeout, .peerTerminated,
+            .statistics("ricevuti 120, inviati 80; invio: coda piena 3 volte, scartati 0"),
         ])
     }
 
@@ -57,12 +60,12 @@ struct SessionLogParserTests {
         #expect(buffer.append("") == [])
     }
 
-    @Test func pppdQuoting() {
-        #expect(PrivilegedSession.pppdQuoted(#"pa"ss\word"#) == #""pa\"ss\\word""#)
+    @Test func secretQuoting() {
+        #expect(PrivilegedSession.secretQuoted(#"pa"ss\word"#) == #""pa\"ss\\word""#)
     }
 
-    @Test func pppdExitCodes() {
-        #expect(ConnectionController.describe(pppdStatus: 19, wasConnected: false).contains("username e password"))
-        #expect(ConnectionController.describe(pppdStatus: 5, wasConnected: true) == "Connessione interrotta.")
+    @Test func exitCodes() {
+        #expect(ConnectionController.describe(exitStatus: 19, wasConnected: false).contains("username e password"))
+        #expect(ConnectionController.describe(exitStatus: 5, wasConnected: true) == "Connessione interrotta.")
     }
 }

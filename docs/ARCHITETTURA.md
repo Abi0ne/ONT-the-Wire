@@ -4,15 +4,19 @@
 
 macOS ha un client PPPoE integrato e consente di crearlo sopra un'interfaccia VLAN (`vlan0`). Però il servizio salvato con `DeviceName = vlan0` in pratica non funziona: con `tcpdump` si vede che i PADI escono **senza tag 802.1Q** e con il MAC di `en0` (il Wi-Fi), perché il kernel usa sempre un'interfaccia fisica `en<N>`. Il PPPoE di sistema su VLAN quindi non raggiunge mai il concentratore.
 
-ONT The Wire costruisce da sé i frame Ethernet, tag VLAN compreso, e affida a `pppd` di sistema solo il protocollo PPP.
+ONT The Wire costruisce da sé i frame Ethernet, tag VLAN compreso, e gestisce da sé anche il protocollo PPP; gli indirizzi IPv4 passano da un'interfaccia `utun`.
+
+### Perché non `pppd`
+
+Fino alla 0.2.1 il PPP lo faceva `pppd` di sistema, con il relay come trasporto su un pty. Il pty di macOS passa i dati alla gestione PPP del kernel un byte alla volta (HDLC asincrono: escape e FCS-16 per ogni byte), in un solo flusso: sulla stessa linea in cui un router satura 1 Gbit/s ci si fermava a circa 320 Mbit/s in download e 340 in upload, con `pppoe-relay` vicino al 90% di un core e `kernel_task` oltre il 100% (misura del 4 novembre 2026). Con `utun` ogni pacchetto è una sola `read`/`write`, senza HDLC: nella prima prova il download ha superato i 900 Mbit/s.
 
 ## Componenti
 
 ```
 ┌───────────────────────── ONT The Wire.app (utente) ─────────────────────────┐
 │ SwiftUI ── ConnectionController ── PrivilegedSession ── RootBroker ─────────┐│
-│                 │                        ▲ legge relay.log / pppd.log / exit ││
-│                 └─ SpeedTest (NWConnection su ppp0)                          ││
+│                 │                        ▲ legge relay.log / exit           ││
+│                 └─ SpeedTest (NWConnection su utun<N>)                       ││
 └──────────────────────────────────────────────────────────────────────────────┘│
         pipe privata (AuthorizationExecuteWithPrivileges)                        │
 ┌───────────────────────────── root ─────────────────────────────────────────────┘
@@ -22,37 +26,38 @@ ONT The Wire costruisce da sé i frame Ethernet, tag VLAN compreso, e affida a `
 │                     ont-session.sh     (uno per sessione, supervisore)
 │                           │
 │                           ▼
-│              /usr/sbin/pppd  pty "pppoe-relay -I en7 -V 835"
-│                           │  HDLC asincrono su pty
-│                           ▼
-│                     pppoe-relay ── BPF ── en7 ── [802.1Q 835] ── ONT ── BRAS
+│      utun<N> ⇄ pppoe-relay -I en7 -V 835 -A <secret> ⇄ BPF ⇄ en7 ⇄ [802.1Q 835] ⇄ ONT ⇄ BRAS
 └──────────────────────────────────────────────────────────────────────────────
 ```
 
 ### `pppoe-relay` (C, `Sources/pppoe-relay/main.c`)
 
-Il trasporto PPPoE (RFC 2516) per `pppd`.
+Client PPPoE (RFC 2516) e PPP completo.
 
 - Apre `/dev/bpf*` sull'interfaccia fisica con un filtro per gli EtherType 0x8863 (discovery) e 0x8864 (sessione). Con `-V` riconosce anche i frame con tag 802.1Q.
 - **Discovery**: PADI → PADO → PADR → PADS. Il PADI viene ripetuto a intervalli fissi fino a `-T` secondi, il PADR fino a 3 volte.
-- **Sessione**: verso `pppd` parla HDLC asincrono sul pty (flag 0x7E, escape 0x7D, FCS-16), verso la rete frame PPPoE di sessione con il tag VLAN e la priorità PCP (`-P`) aggiunti dal relay.
-- Su SIGTERM/SIGHUP, o alla chiusura del pty, invia **PADT** al concentratore. Su PADT ricevuto esce con codice 4.
-- Scrive righe `STATUS …` nel suo log (`-L`), lette dall'app: `discovery`, `pado`, `session`, `timeout`, `error`, `padt`.
+- **LCP** (RFC 1661): chiede MRU 1492 e un magic number; accetta dal server MRU, magic e autenticazione PAP o CHAP-MD5 (a MS-CHAP o EAP risponde con un Nak che propone CHAP-MD5). Risponde agli LCP echo e ne manda uno ogni 10 s: dopo 4 senza risposta chiude la sessione. Ai protocolli che non gestisce (IPv6CP, CCP…) risponde con Protocol-Reject.
+- **Autenticazione**: PAP (RFC 1334) o CHAP-MD5 (RFC 1994, anche le richieste ripetute durante la sessione). Credenziali dal file `-A`.
+- **IPCP** (RFC 1332, 1877): chiede indirizzo e due DNS; li prende dal Nak del server.
+- **Piano dati**: crea `utun<N>` (indirizzo punto-punto, MTU = min(1492, MRU del server)). Il thread principale legge da BPF e scrive su `utun`; un secondo thread legge da `utun` e scrive su BPF. Solo IPv4.
+- Su SIGTERM/SIGHUP manda LCP Terminate-Request, poi **PADT**. Su PADT ricevuto esce subito.
+- Scrive righe `STATUS …` nel suo log (`-L`), lette dall'app: `discovery`, `pado`, `session`, `timeout`, `error`, `padt`, `auth`, `auth-ok`, `auth-failed`, `interface`, `local`, `remote`, `dns`, `up` (tutto su una riga, per il supervisore), `echo-timeout`, `lcp-terminated`, `stats`.
 
-Opzioni: `-I iface`, `-V vlan`, `-P pcp`, `-S service`, `-C ac-name`, `-T timeout`, `-L logfile`, `-D` (solo discovery, per diagnosi).
+Opzioni: `-I iface`, `-A credenziali`, `-V vlan`, `-P pcp`, `-S service`, `-C ac-name`, `-T timeout`, `-L logfile`, `-D` (solo discovery, per diagnosi; non serve `-A`).
 
-Codici di uscita: 0 ok, 1 errore di sistema, 2 nessun PADO, 3 nessun PADS, 4 PADT ricevuto.
+Codici di uscita, con gli stessi valori di `pppd` per gli stessi casi: 0 ok, 1 errore di sistema, 2 opzioni, 5 chiusura richiesta, 8 nessun PADO/PADS, 10 negoziazione PPP fallita, 15 il server non risponde agli echo, 16 sessione chiusa dal server (PADT, LCP Terminate), 19 autenticazione rifiutata.
 
-**Prestazioni**: con una sessione da gigabit il relay è sul percorso di ogni pacchetto. Per questo:
+**Prestazioni**:
 
-- usa un buffer BPF da 512 KB;
-- raccoglie tutti i frame di una lettura BPF in un buffer da 1 MB e li scrive verso `pppd` in una sola `write`;
-- calcola escape e FCS con tabelle in un solo passaggio;
-- nel decoder copia a blocchi i tratti che non hanno escape.
+- buffer BPF da 512 KB letto a blocchi;
+- verso `utun` nessuna copia: i 4 byte prima dell'header IP nel buffer BPF vengono sovrascritti con l'intestazione di `utun` e il pacchetto parte con una sola `write`; in uscita il pacchetto viene letto subito dopo lo spazio per gli header Ethernet/VLAN/PPPoE/PPP;
+- un thread per direzione, con QoS `USER_INTERACTIVE` per restare sui core ad alte prestazioni;
+- se la coda dell'adattatore è piena (`ENOBUFS`) il frame in uscita viene ritentato fino a circa 10 ms invece di essere scartato, così il TCP rallenta per la coda di `utun` e non per una perdita;
+- a fine sessione la riga `STATUS stats` riporta pacchetti per direzione, code piene, scarti, frame persi da BPF ed errori delle interfacce: l'app la mostra nel Log.
 
 ### `ont-root-helper` (C)
 
-`AuthorizationExecuteWithPrivileges` avvia il processo con euid 0 ma uid reale dell'utente. L'helper esegue `setgid(0)`/`setuid(0)` e poi `exec` di `/bin/bash ont-broker.sh`, così broker, supervisore e `pppd` girano come root a tutti gli effetti.
+`AuthorizationExecuteWithPrivileges` avvia il processo con euid 0 ma uid reale dell'utente. L'helper esegue `setgid(0)`/`setuid(0)` e poi `exec` di `/bin/bash ont-broker.sh`, così broker, supervisore e relay girano come root a tutti gli effetti.
 
 ### `ont-broker.sh`
 
@@ -71,16 +76,12 @@ Il supervisore di una singola sessione.
 
 1. Controlla i parametri (formato dell'interfaccia, VLAN numerica, cartella non simbolica).
 2. Sposta il file `secret` in `/var/run/ontthewire.XXXXXX`, leggibile solo da root, e cancella l'originale.
-3. Avvia `pppd` con queste opzioni:
+3. Avvia il relay:
    ```
-   pty "'<relay>' -I <iface> -T 30 -L '<dir>/relay.log' [-V <vlan>]"
-   file <secret> nodetach debug logfile <dir>/pppd.log
-   noauth noipdefault usepeerdns mtu 1492 mru 1492
-   noaccomp nopcomp novj noccp
-   lcp-echo-interval 10 lcp-echo-failure 4 maxfail 1
+   pppoe-relay -I <iface> -T 30 -L <dir>/relay.log -A <secret> [-V <vlan>]
    ```
-4. Con "connessione principale" pubblica in `SCDynamicStore` `State:/Network/Service/it.ontthewire.pppoe/IPv4` (con `OverridePrimary`) e `DNS`, che macOS usa per la route predefinita e i resolver. Li rimuove all'uscita.
-5. Si ferma quando compare il file `<dir>/stop` o quando il processo dell'app non esiste più. Scrive il codice di uscita di `pppd` in `<dir>/exit`.
+4. Con "connessione principale", appena il relay scrive la riga `STATUS up`, pubblica in `SCDynamicStore` `State:/Network/Service/it.ontthewire.pppoe/IPv4` (con `OverridePrimary`) e `DNS`, che macOS usa per la route predefinita e i resolver. Li rimuove all'uscita.
+5. Si ferma quando compare il file `<dir>/stop` o quando il processo dell'app non esiste più. Scrive il codice di uscita del relay in `<dir>/exit`.
 
 ### Lato Swift (`Sources/ONTTheWireCore`)
 
@@ -88,8 +89,8 @@ Il supervisore di una singola sessione.
 | --- | --- |
 | `Session/RootBroker.swift` | Autorizzazione (`system.privilege.admin`), avvio dell'helper, protocollo sulla pipe |
 | `Session/PrivilegedSession.swift` | Cartella di sessione (0700) e `secret` (0600), lettura dei log ogni 0,4 s, stop e timeout |
-| `Session/SessionEvent.swift` | `SessionLogParser`: da righe di `relay.log` e `pppd.log` a eventi tipizzati |
-| `Controller/ConnectionController.swift` | Macchina a stati, messaggi, watchdog di 75 s, codici di uscita di `pppd` |
+| `Session/SessionEvent.swift` | `SessionLogParser`: da righe di `relay.log` a eventi tipizzati |
+| `Controller/ConnectionController.swift` | Macchina a stati, messaggi, watchdog di 75 s, codici di uscita del relay |
 | `Network/InterfaceCatalog.swift` | Elenco degli adattatori e stato del link via `SCDynamicStore`, aggiornato a ogni collegamento o scollegamento |
 | `SpeedTest/SpeedTest.swift` | Test di velocità multi-flusso |
 | `Update/Updates.swift`, `Update/Updater.swift` | Aggiornamenti firmati da GitHub Releases |
@@ -101,7 +102,7 @@ Il supervisore di una singola sessione.
 
 ## Test di velocità
 
-- Usa Network.framework: ogni `NWConnection` ha `requiredInterface` impostato sull'interfaccia `ppp0`, quindi il traffico passa dal PPPoE anche se non è la route predefinita.
+- Usa Network.framework: ogni `NWConnection` ha `requiredInterface` impostato sull'interfaccia della sessione (`utun<N>`), quindi il traffico passa dal PPPoE anche se non è la route predefinita.
 - **Ping**: 10 handshake TCP verso `speed.cloudflare.com:443`; mediana e jitter (media delle differenze tra campioni consecutivi, come Ookla).
 - **Download e upload**: 12 s ciascuno, i primi 2 s esclusi dalla media. I flussi vengono distribuiti tra i server rispettando il limite di ciascuno:
 
@@ -133,7 +134,7 @@ idle → preparing → searchingServer → authenticating → configuringNetwork
 connected → disconnecting → idle
 ```
 
-`failed` mostra il motivo, ricavato dagli eventi di sessione oppure dal codice di uscita di `pppd`:
+`failed` mostra il motivo, ricavato dagli eventi di sessione oppure dal codice di uscita del relay:
 
 | Codice | Significato |
 | --- | --- |

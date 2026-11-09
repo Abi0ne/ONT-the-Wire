@@ -204,8 +204,8 @@ public final class ConnectionController {
         case .peerTerminated:
             log.warning("Il server ha chiuso il collegamento PPP.")
             if failureReason == nil { failureReason = "Il server ha chiuso il collegamento." }
-        case .terminated:
-            break
+        case .statistics(let text):
+            log.info("Statistiche della sessione: \(text).")
         case .supervisorFailed(let detail):
             failureReason = "La sessione non è partita" + (detail.isEmpty ? "." : ": \(detail)")
         }
@@ -213,7 +213,7 @@ public final class ConnectionController {
 
     private func handleExit(_ status: Int?) {
         speedTest.cancel()
-        log.info("Sessione terminata (pppd \(status.map(String.init) ?? "–")).")
+        log.info("Sessione terminata (codice \(status.map(String.init) ?? "–")).")
         let wasConnected: Bool = { if case .connected = state { return true }; return false }()
         defer { details.endSession() }
 
@@ -222,7 +222,7 @@ public final class ConnectionController {
             return
         }
         attemptID = UUID()
-        let message = failureReason ?? Self.describe(pppdStatus: status, wasConnected: wasConnected)
+        let message = failureReason ?? Self.describe(exitStatus: status, wasConnected: wasConnected)
         log.error(message)
         state = .failed(message)
     }
@@ -265,9 +265,9 @@ public final class ConnectionController {
         for warning in result.warnings { log.warning("Test di velocità: \(warning)") }
     }
 
-    /// pppd exit codes from pppd(8).
-    nonisolated static func describe(pppdStatus: Int?, wasConnected: Bool) -> String {
-        switch pppdStatus {
+    /// pppoe-relay exit codes (the values pppd(8) uses for the same outcomes).
+    nonisolated static func describe(exitStatus: Int?, wasConnected: Bool) -> String {
+        switch exitStatus {
         case 19: "Autenticazione rifiutata: controlla username e password."
         case 8: "Nessun server PPPoE ha risposto: verifica VLAN ID, cavo e ONT."
         case 15: "Il server PPPoE ha smesso di rispondere."

@@ -5,12 +5,12 @@
 Una sessione PPPoE costruita dal Mac richiede root per tre motivi:
 
 - accesso BPF all'adattatore Ethernet;
-- esecuzione di `pppd`, che crea `ppp0`;
+- creazione e configurazione dell'interfaccia `utun` della sessione;
 - pubblicazione di route e DNS in `SCDynamicStore`.
 
 - **Una richiesta per avvio.** All'avvio l'app chiede il diritto `system.privilege.admin` (password o Touch ID) e avvia **un solo** processo root, `ont-broker.sh`, tramite `AuthorizationExecuteWithPrivileges`. I comandi passano su una pipe privata che solo l'app possiede: altri processi non possono chiedere al broker di aprire sessioni.
 - **Niente installato sul sistema.** Non ci sono LaunchDaemon, helper privilegiati o file in `/Library`. Chiusa l'app, il broker termina e ogni sessione si ferma da sola, perché il supervisore controlla che il processo dell'app esista ancora.
-- **Comandi verificati.** Broker e supervisore controllano il formato di ogni argomento (interfaccia `^[a-z]+[0-9]+$`, VLAN numerica, cartella reale e non un collegamento simbolico, nessun apice nei percorsi) prima di costruire la riga di comando di `pppd`.
+- **Comandi verificati.** Broker e supervisore controllano il formato di ogni argomento (interfaccia `^[a-z]+[0-9]+$`, VLAN numerica, cartella reale e non un collegamento simbolico) prima di avviare il relay, a cui gli argomenti arrivano separati, senza passare da una shell.
 - **API deprecata, scelta consapevole.** `AuthorizationExecuteWithPrivileges` è deprecata, ma è l'unico modo di ottenere un processo root con una pipe privata senza installare un demone firmato con un certificato Developer ID (`SMAppService`).
 
 ### Limite noto
@@ -20,8 +20,8 @@ Gli script e il relay eseguiti come root stanno dentro il bundle dell'app, che a
 ## Credenziali
 
 - Username e password stanno **solo in memoria** finché l'app è aperta. Non vengono salvati in UserDefaults né nel Portachiavi: a ogni avvio i campi sono vuoti.
-- Per avviare `pppd` l'app scrive un file `secret` (`user` e `password`, quotati per `pppd`) con permessi **0600**, in una cartella di sessione **0700** dentro la cartella temporanea dell'utente. Il supervisore root lo **sposta** subito in `/var/run/ontthewire.XXXXXX`, leggibile solo da root, cancella l'originale e rimuove la copia alla fine della sessione.
-- Le credenziali non compaiono nella riga di comando di `pppd` (sarebbero visibili con `ps`) e non vengono mai scritte nel log dell'app. `pppd` è avviato con `debug`, ma non registra le password CHAP né PAP.
+- Per la sessione l'app scrive un file `secret` (`user` e `password`, quotati con la sintassi di `pppd`) con permessi **0600**, in una cartella di sessione **0700** dentro la cartella temporanea dell'utente. Il supervisore root lo **sposta** subito in `/var/run/ontthewire.XXXXXX`, leggibile solo da root, cancella l'originale e rimuove la copia alla fine della sessione.
+- Le credenziali non compaiono nella riga di comando del relay (sarebbero visibili con `ps`), che riceve solo il percorso del file, e non vengono mai scritte nei log. Il relay le tiene in memoria per rispondere a CHAP, anche alle richieste ripetute durante la sessione.
 
 ### SIP Caller
 

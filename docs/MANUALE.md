@@ -69,7 +69,7 @@ All'avvio macOS chiede la **password di amministratore**, o Touch ID se il siste
 
 Se annulli la richiesta l'app resta utilizzabile e l'autorizzazione verrà chiesta alla prima pressione di **Connetti**.
 
-> L'autorizzazione serve per tre cose: leggere e scrivere frame Ethernet direttamente sull'adattatore (BPF), avviare `pppd` e, se scegli "connessione principale", cambiare route e DNS. Vedi [SICUREZZA.md](SICUREZZA.md).
+> L'autorizzazione serve per tre cose: leggere e scrivere frame Ethernet direttamente sull'adattatore (BPF), creare l'interfaccia della sessione e, se scegli "connessione principale", cambiare route e DNS. Vedi [SICUREZZA.md](SICUREZZA.md).
 
 ## 5. Collegamento fisico
 
@@ -104,7 +104,7 @@ Premi **Connetti** (o ⏎). Lo stato passa per queste fasi:
 | **Ricerca del server PPPoE** | PADI inviati con il tag VLAN e attesa del PADO dal concentratore (al massimo 30 s) |
 | **Autenticazione** | Sessione PPPoE aperta, negoziazione LCP e invio delle credenziali (CHAP o PAP) |
 | **Configurazione indirizzo IP** | IPCP: il server assegna indirizzo, gateway e DNS |
-| **Connessa** | Sessione attiva: compare l'interfaccia `ppp0` con il suo indirizzo |
+| **Connessa** | Sessione attiva: compare l'interfaccia della sessione (`utun<N>`) con il suo indirizzo |
 
 Se dopo **75 secondi** la connessione non è completa, il tentativo viene interrotto e l'app mostra il motivo.
 
@@ -149,7 +149,7 @@ La scheda **Log** riporta, con orario, tutto quello che fa la sessione:
 
 - discovery PPPoE (PADI, PADO con nome e MAC del concentratore, PADR, PADS con Session ID, PADT);
 - fasi PPP (LCP, autenticazione, IPCP) e indirizzi ottenuti;
-- messaggi di errore di pppd tradotti;
+- messaggi di errore PPP tradotti;
 - risultati del test di velocità e degli aggiornamenti.
 
 Da qui puoi copiare tutto il log per allegarlo a una segnalazione. Le credenziali non compaiono mai nel log.
@@ -189,7 +189,7 @@ Come per il PPPoE, le credenziali **non vengono salvate**.
 Il test funziona su qualsiasi connessione del Mac:
 
 - **Automatica**: la rete principale del Mac (se il PPPoE è la connessione principale, passa da lì);
-- una rete precisa: **PPPoE** (`ppp0`, quando la sessione di ONT The Wire è attiva), **Wi‑Fi**, **Ethernet**…
+- una rete precisa: **PPPoE** (`utun<N>`, quando la sessione di ONT The Wire è attiva), **Wi‑Fi**, **Ethernet**…
 
 Dietro un router (Wi‑Fi o cavo di casa), l'app ricava l'indirizzo pubblico dalla risposta del server, si registra di nuovo con quell'indirizzo e tiene aperta la porta sul router con un messaggio ogni 25 s. Il PPPoE di solito ha un indirizzo pubblico e non ne ha bisogno.
 
@@ -268,16 +268,16 @@ Se sei senza Internet (ad esempio in campo con il solo ONT collegato), il contro
 A sessione connessa:
 
 ```sh
-ifconfig ppp0                          # indirizzo della sessione
-route -n get default                   # con "connessione principale": interface ppp0
-ping -c 3 -b ppp0 1.1.1.1              # ping forzato sull'interfaccia PPPoE
-scutil --dns | grep -A3 ppp0           # DNS forniti dall'operatore
+ifconfig utun7                         # indirizzo della sessione (il numero è nel riepilogo)
+route -n get default                   # con "connessione principale": interface utun7
+ping -c 3 -b utun7 1.1.1.1             # ping forzato sull'interfaccia PPPoE
+scutil --dns | grep -A3 utun7          # DNS forniti dall'operatore
 ```
 
 Dopo la disconnessione non deve rimanere nulla:
 
 ```sh
-pgrep -l pppd; pgrep -l pppoe-relay    # nessun processo
+pgrep -l pppoe-relay                   # nessun processo
 route -n get default                   # di nuovo l'interfaccia abituale
 ```
 
@@ -298,5 +298,5 @@ L'autorizzazione non viene conservata tra un avvio e l'altro, per scelta: nessun
 **IPv6?**
 Non ancora: la versione 0.1.0 negozia solo IPv4 (IPCP).
 
-**Dove trovo i log tecnici di pppd?**
+**Dove trovo i log tecnici della sessione?**
 Durante la sessione stanno in una cartella temporanea privata e vengono riportati nella scheda Log. Alla chiusura vengono cancellati.

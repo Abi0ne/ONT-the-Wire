@@ -243,7 +243,7 @@ public final class SpeedTest {
         return diffs.reduce(0, +) / Double(diffs.count)
     }
 
-    /// The Network.framework handle for a BSD interface name, e.g. "ppp0".
+    /// The Network.framework handle for a BSD interface name, e.g. "utun7".
     nonisolated static func findInterface(named name: String) async -> NWInterface? {
         await withCheckedContinuation { continuation in
             let monitor = NWPathMonitor()

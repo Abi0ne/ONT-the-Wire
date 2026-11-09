@@ -1,21 +1,29 @@
-// pppoe-relay: PPPoE client transport (RFC 2516) over an optional 802.1Q VLAN
-// tag, for pppd's `pty` option.
+// pppoe-relay: PPPoE client (RFC 2516) over an optional 802.1Q VLAN tag.
 //
 // macOS' built-in PPPoE cannot run on a VLAN interface (it ends up on en<N>),
 // so this program talks to the physical Ethernet interface through BPF and
 // adds the VLAN tag itself. It performs discovery (PADI/PADO/PADR/PADS), then
-// relays session frames between the wire and pppd, which talks async HDLC on
-// stdin/stdout. Requires root (BPF).
+// runs PPP itself (LCP, PAP or CHAP-MD5, IPCP with DNS) and carries IPv4 over
+// a utun interface: one thread moves wire -> utun, another utun -> wire.
+// There is no pppd and no HDLC/pty in the data path, which on macOS capped
+// throughput at ~350 Mbit/s. Requires root (BPF, utun configuration).
 //
 // Status lines go to stderr (and to -L <file>), prefixed by "pppoe-relay:".
 // Lines starting with "STATUS " are machine-readable for the app.
 
+#include <CommonCrypto/CommonDigest.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/bpf.h>
 #include <net/if.h>
 #include <net/if_dl.h>
+#include <net/if_utun.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <pthread/qos.h>
+#include <stdatomic.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -23,9 +31,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/kern_control.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/sockio.h>
+#include <sys/sys_domain.h>
 #include <sys/time.h>
-#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -54,12 +65,18 @@
 #define MAX_PPP_PAYLOAD 1494 // 1500 - 6 bytes PPPoE header
 #define DISCOVERY_RETRY_SECONDS 3
 
+// Exit codes, with the values pppd(8) uses for the same outcomes.
 enum {
     EXIT_OK = 0,
     EXIT_SYSTEM = 1,
-    EXIT_NO_PADO = 2,
-    EXIT_NO_PADS = 3,
-    EXIT_PADT = 4,
+    EXIT_OPTIONS = 2,
+    EXIT_USER = 5,
+    EXIT_NO_PADO = 8,
+    EXIT_NO_PADS = 8,
+    EXIT_NEGOTIATION = 10,
+    EXIT_PEER_DEAD = 15,
+    EXIT_HANGUP = 16,
+    EXIT_AUTH = 19,
 };
 
 // MARK: Options and state
@@ -71,6 +88,7 @@ static const char *opt_service = "";
 static const char *opt_ac_name;
 static int opt_timeout = 30;
 static int opt_discovery_only;
+static const char *opt_secret;
 static FILE *log_file;
 
 static int bpf_fd = -1;
@@ -497,241 +515,901 @@ static int discover(void) {
     return EXIT_NO_PADS;
 }
 
-// MARK: Async HDLC (RFC 1662) towards pppd
+// MARK: Credentials
 
-static uint16_t fcs_table[256];
+static char username[256];
+static char password[256];
 
-static void init_fcs(void) {
-    for (unsigned b = 0; b < 256; b++) {
-        uint16_t v = (uint16_t)b;
-        for (int i = 0; i < 8; i++) v = (v & 1) ? (v >> 1) ^ 0x8408 : v >> 1;
-        fcs_table[b] = v;
-    }
-}
-
-static uint16_t fcs16(uint16_t fcs, const uint8_t *p, size_t len) {
-    while (len--) fcs = (fcs >> 8) ^ fcs_table[(fcs ^ *p++) & 0xff];
-    return fcs;
-}
-
-static int write_all(int fd, const uint8_t *p, size_t len) {
-    while (len) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
+/// Reads a value in pppd options syntax: "quoted" with \ escapes, or a bare word.
+static void read_value(const char *s, char *out, size_t size) {
+    size_t n = 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '"') {
+        for (s++; *s && *s != '"'; s++) {
+            if (*s == '\\' && s[1]) s++;
+            if (n + 1 < size) out[n++] = *s;
         }
-        p += n;
-        len -= (size_t)n;
-    }
-    return 0;
-}
-
-// Frames for pppd are encoded into one buffer and written with a single
-// write() per batch of BPF frames: per-frame writes to the pty were the
-// bottleneck (~300 Mbit/s with one core saturated).
-static uint8_t out_buf[1 << 20];
-static size_t out_len;
-static uint8_t escape_table[256];
-
-static void init_escape_table(void) {
-    // pppd's receive ACCM is all control characters until LCP is up, so they
-    // are always escaped; the kernel accepts escaped bytes in any state.
-    for (unsigned b = 0; b < 256; b++) escape_table[b] = (b < 0x20 || b == 0x7d || b == 0x7e);
-}
-
-static int flush_to_pppd(void) {
-    if (!out_len) return 0;
-    int r = write_all(STDOUT_FILENO, out_buf, out_len);
-    out_len = 0;
-    return r;
-}
-
-static inline void put_escaped(uint8_t **o, uint8_t b) {
-    if (escape_table[b]) {
-        *(*o)++ = 0x7d;
-        *(*o)++ = b ^ 0x20;
     } else {
-        *(*o)++ = b;
+        for (; *s && *s != ' ' && *s != '\t' && *s != '\n' && *s != '\r'; s++)
+            if (n + 1 < size) out[n++] = *s;
     }
+    out[n] = 0;
 }
 
-/// Appends one PPP frame (protocol + data) to the batch for pppd.
-static int write_to_pppd(const uint8_t *payload, size_t len) {
-    if (len > MAX_FRAME) return 0;
-    // Worst case: every byte escaped, plus address/control, FCS and flags.
-    if (out_len + 2 * (len + 4) + 2 > sizeof out_buf && flush_to_pppd() < 0) return -1;
-
-    uint8_t *o = out_buf + out_len;
-    *o++ = 0x7e;
-    static const uint8_t header[2] = {0xff, 0x03};
-    uint16_t fcs = fcs16(0xffff, header, 2);
-    *o++ = 0xff;
-    *o++ = 0x7d;
-    *o++ = 0x03 ^ 0x20;
-    for (size_t i = 0; i < len; i++) {
-        uint8_t b = payload[i];
-        fcs = (fcs >> 8) ^ fcs_table[(fcs ^ b) & 0xff];
-        put_escaped(&o, b);
+/// Reads `user` and `password` lines from the secret file written by the app.
+static int read_secret(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        logmsg("file delle credenziali %s: %s", path, strerror(errno));
+        return -1;
     }
-    fcs ^= 0xffff;
-    put_escaped(&o, fcs & 0xff);
-    put_escaped(&o, fcs >> 8);
-    *o++ = 0x7e;
-    out_len = (size_t)(o - out_buf);
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "user ", 5) == 0) read_value(line + 5, username, sizeof username);
+        if (strncmp(line, "password ", 9) == 0) read_value(line + 9, password, sizeof password);
+    }
+    memset(line, 0, sizeof line);
+    fclose(f);
+    if (!username[0]) {
+        logmsg("file delle credenziali senza username");
+        return -1;
+    }
     return 0;
 }
 
-struct hdlc_decoder {
-    uint8_t buf[MAX_FRAME];
-    size_t len;
-    int escaped;
-    int overflow;
-};
+// MARK: PPP framing (RFC 1661)
 
-static int send_session(const uint8_t *payload, size_t len) {
+#define PPP_IP 0x0021
+#define PPP_IPCP 0x8021
+#define PPP_LCP 0xc021
+#define PPP_PAP 0xc023
+#define PPP_CHAP 0xc223
+
+#define CP_CONF_REQ 1
+#define CP_CONF_ACK 2
+#define CP_CONF_NAK 3
+#define CP_CONF_REJ 4
+#define CP_TERM_REQ 5
+#define CP_TERM_ACK 6
+#define CP_CODE_REJ 7
+#define CP_PROT_REJ 8
+#define CP_ECHO_REQ 9
+#define CP_ECHO_REP 10
+
+#define OUR_MRU 1492
+#define RESTART_SECONDS 3.0
+#define MAX_CONFIGURE 10
+#define CHAP_WAIT_SECONDS 30.0
+#define ECHO_INTERVAL 10.0
+#define ECHO_FAILURES 4
+#define TERMINATE_SECONDS 1.5
+
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static int send_ppp(uint16_t protocol, const uint8_t *data, size_t len) {
     uint8_t frame[MAX_FRAME];
-    if (len > MAX_PPP_PAYLOAD) return 0;
-    size_t off = build_header(frame, ac_mac, ETHERTYPE_SESS, CODE_SESS, session_id, (uint16_t)len);
-    memcpy(frame + off, payload, len);
+    if (len + 2 > MAX_PPP_PAYLOAD) return 0;
+    size_t off = build_header(frame, ac_mac, ETHERTYPE_SESS, CODE_SESS, session_id, (uint16_t)(len + 2));
+    frame[off++] = protocol >> 8;
+    frame[off++] = protocol & 0xff;
+    memcpy(frame + off, data, len);
     return send_frame(frame, off + len);
 }
 
-/// A complete HDLC frame from pppd: check FCS, strip address/control, send.
-static void hdlc_frame_done(struct hdlc_decoder *d) {
-    if (!d->overflow && d->len >= 4 && fcs16(0xffff, d->buf, d->len) == 0xf0b8) {
-        const uint8_t *p = d->buf;
-        size_t n = d->len - 2;
-        if (n >= 2 && p[0] == 0xff && p[1] == 0x03) {
-            p += 2;
-            n -= 2;
-        }
-        send_session(p, n);
-    }
-    d->len = 0;
-    d->escaped = 0;
-    d->overflow = 0;
+static int send_cp(uint16_t protocol, uint8_t code, uint8_t id, const uint8_t *data, size_t len) {
+    uint8_t packet[MAX_FRAME];
+    if (len + 4 > MAX_PPP_PAYLOAD - 2) return 0;
+    packet[0] = code;
+    packet[1] = id;
+    packet[2] = (uint8_t)((len + 4) >> 8);
+    packet[3] = (len + 4) & 0xff;
+    if (len) memcpy(packet + 4, data, len);
+    return send_ppp(protocol, packet, len + 4);
 }
 
-static void hdlc_input(struct hdlc_decoder *d, const uint8_t *p, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        // Fast path: copy a run of ordinary bytes in one go.
-        if (!d->escaped) {
-            size_t run = i;
-            while (run < n && p[run] != 0x7e && p[run] != 0x7d) run++;
-            if (run > i) {
-                size_t count = run - i;
-                if (d->len + count <= sizeof d->buf) {
-                    memcpy(d->buf + d->len, p + i, count);
-                    d->len += count;
-                } else {
-                    d->overflow = 1;
-                }
-                i = run;
-                if (i == n) break;
-            }
-        }
-        uint8_t b = p[i];
-        if (b == 0x7e) {
-            hdlc_frame_done(d);
-            continue;
-        }
-        if (b == 0x7d) {
-            d->escaped = 1;
-            continue;
-        }
-        if (d->escaped) {
-            b ^= 0x20;
-            d->escaped = 0;
-        }
-        if (d->len < sizeof d->buf) d->buf[d->len++] = b;
-        else d->overflow = 1;
-    }
+/// Iterates configuration options. Returns 0 at the end or on a malformed one.
+static int next_option(const uint8_t **cursor, const uint8_t *end, const uint8_t **option, uint8_t *type,
+                       const uint8_t **value, size_t *len) {
+    if (*cursor + 2 > end) return 0;
+    uint8_t total = (*cursor)[1];
+    if (total < 2 || *cursor + total > end) return 0;
+    *option = *cursor;
+    *type = (*cursor)[0];
+    *value = *cursor + 2;
+    *len = total - 2u;
+    *cursor += total;
+    return 1;
 }
 
-// MARK: Session relay
+static size_t put_option(uint8_t *p, uint8_t type, const void *value, size_t len) {
+    p[0] = type;
+    p[1] = (uint8_t)(len + 2);
+    memcpy(p + 2, value, len);
+    return len + 2;
+}
 
-struct session_ctx {
-    int padt;
+// MARK: Control protocols (LCP, IPCP)
+
+/// The Configure-Request/Ack/Nak/Reject exchange shared by LCP and IPCP.
+struct cp {
+    uint16_t protocol;
+    const char *name;
+    int ours_acked;   // the peer acked our Configure-Request
+    int theirs_acked; // we acked the peer's Configure-Request
+    uint8_t id;       // id of our last Configure-Request
+    int sent;         // Configure-Requests sent so far
+    double retry_at;  // 0 when no request is outstanding
+    size_t (*build)(uint8_t *options);
+    void (*adjust)(uint8_t code, const uint8_t *options, size_t len);
+    /// Checks the peer's options; returns CP_CONF_ACK, or NAK/REJ with the
+    /// options for the reply. Values are applied only on ACK.
+    uint8_t (*check)(const uint8_t *options, size_t len, uint8_t *reply, size_t *reply_len);
 };
 
-static int handle_session(const struct pppoe_frame *f, void *ctx) {
-    struct session_ctx *c = ctx;
-    if (memcmp(f->src, ac_mac, 6) != 0 || f->session != session_id) return 0;
-    if (f->ethertype == ETHERTYPE_DISC && f->code == CODE_PADT) {
-        c->padt = 1;
-        return 1;
-    }
-    if (f->ethertype == ETHERTYPE_SESS && f->code == CODE_SESS) {
-        if (write_to_pppd(f->payload, f->payload_len) < 0) return -1;
-    }
-    return 0;
+static int cp_is_open(const struct cp *cp) { return cp->ours_acked && cp->theirs_acked; }
+
+static void cp_send_request(struct cp *cp) {
+    uint8_t options[64];
+    size_t len = cp->build(options);
+    cp->id++;
+    cp->sent++;
+    cp->retry_at = now_seconds() + RESTART_SECONDS;
+    send_cp(cp->protocol, CP_CONF_REQ, cp->id, options, len);
 }
 
-static int relay(void) {
-    struct hdlc_decoder decoder = {0};
-    struct session_ctx ctx = {0};
-    static uint8_t in[256 * 1024];
+static void cp_start(struct cp *cp) {
+    cp->ours_acked = cp->theirs_acked = 0;
+    cp->sent = 0;
+    cp_send_request(cp);
+}
 
+enum { CP_NOTHING, CP_OPENED, CP_RENEGOTIATE, CP_TERMINATED, CP_OTHER };
+
+/// Handles the configuration and termination codes. Returns CP_OPENED when
+/// the protocol has just opened, CP_OTHER for codes left to the caller.
+static int cp_input(struct cp *cp, const uint8_t *packet, size_t len) {
+    if (len < 4) return CP_NOTHING;
+    uint8_t code = packet[0], id = packet[1];
+    size_t total = (size_t)(packet[2] << 8 | packet[3]);
+    if (total < 4 || total > len) return CP_NOTHING;
+    const uint8_t *data = packet + 4;
+    size_t data_len = total - 4;
+    int was_open = cp_is_open(cp);
+
+    switch (code) {
+    case CP_CONF_REQ: {
+        uint8_t reply[MAX_FRAME];
+        size_t reply_len = 0;
+        uint8_t result = cp->check(data, data_len, reply, &reply_len);
+        if (result == CP_CONF_ACK) {
+            send_cp(cp->protocol, CP_CONF_ACK, id, data, data_len);
+        } else {
+            send_cp(cp->protocol, result, id, reply, reply_len);
+        }
+        // An open link that gets the same options again only lost our Ack;
+        // anything else is a renegotiation.
+        if (was_open) return result == CP_CONF_ACK ? CP_NOTHING : CP_RENEGOTIATE;
+        cp->theirs_acked = result == CP_CONF_ACK;
+        break;
+    }
+    case CP_CONF_ACK:
+        if (id != cp->id || cp->ours_acked) return CP_NOTHING;
+        cp->ours_acked = 1;
+        cp->retry_at = 0;
+        break;
+    case CP_CONF_NAK:
+    case CP_CONF_REJ:
+        if (id != cp->id || cp->ours_acked) return CP_NOTHING;
+        cp->adjust(code, data, data_len);
+        cp_send_request(cp);
+        break;
+    case CP_TERM_REQ:
+        send_cp(cp->protocol, CP_TERM_ACK, id, NULL, 0);
+        return CP_TERMINATED;
+    default:
+        return CP_OTHER;
+    }
+    return !was_open && cp_is_open(cp) ? CP_OPENED : CP_NOTHING;
+}
+
+// LCP: we ask for MRU 1492 and a magic number; the peer chooses PAP or CHAP-MD5.
+
+static int lcp_send_mru = 1, lcp_send_magic = 1;
+static uint16_t lcp_mru = OUR_MRU;
+static uint32_t our_magic;
+static uint16_t peer_mru = 1500;
+static uint16_t auth_protocol; // 0, PPP_PAP or PPP_CHAP
+
+static size_t lcp_build(uint8_t *p) {
+    size_t n = 0;
+    if (lcp_send_mru) {
+        uint8_t mru[2] = {lcp_mru >> 8, lcp_mru & 0xff};
+        n += put_option(p + n, 1, mru, 2);
+    }
+    if (lcp_send_magic) {
+        uint32_t magic = htonl(our_magic);
+        n += put_option(p + n, 5, &magic, 4);
+    }
+    return n;
+}
+
+static void lcp_adjust(uint8_t code, const uint8_t *options, size_t len) {
+    const uint8_t *cursor = options, *option, *value;
+    uint8_t type;
+    size_t vlen;
+    while (next_option(&cursor, options + len, &option, &type, &value, &vlen)) {
+        if (type == 1) {
+            uint16_t mru = vlen == 2 ? (uint16_t)(value[0] << 8 | value[1]) : 0;
+            if (code == CP_CONF_NAK && mru >= 576 && mru <= OUR_MRU) lcp_mru = mru;
+            else lcp_send_mru = 0;
+        } else if (type == 5) {
+            if (code == CP_CONF_NAK) our_magic = arc4random();
+            else lcp_send_magic = 0;
+        }
+    }
+}
+
+static uint8_t lcp_check(const uint8_t *options, size_t len, uint8_t *reply, size_t *reply_len) {
+    uint8_t rejected[MAX_FRAME], naked[16];
+    size_t rejected_len = 0, naked_len = 0;
+    uint16_t mru = 1500, auth = 0;
+    const uint8_t *cursor = options, *option, *value;
+    uint8_t type;
+    size_t vlen;
+    while (next_option(&cursor, options + len, &option, &type, &value, &vlen)) {
+        int ok = 0;
+        if (type == 1 && vlen == 2) {
+            mru = (uint16_t)(value[0] << 8 | value[1]);
+            ok = 1;
+        } else if (type == 3 && vlen >= 2) {
+            auth = (uint16_t)(value[0] << 8 | value[1]);
+            if ((auth == PPP_PAP && vlen == 2) || (auth == PPP_CHAP && vlen == 3 && value[2] == 5)) {
+                ok = 1;
+            } else {
+                // MS-CHAP, EAP...: suggest CHAP with MD5.
+                static const uint8_t chap_md5[3] = {PPP_CHAP >> 8, PPP_CHAP & 0xff, 5};
+                naked_len = put_option(naked, 3, chap_md5, 3);
+                continue;
+            }
+        } else if (type == 5 && vlen == 4) {
+            ok = 1;
+        }
+        if (!ok) {
+            memcpy(rejected + rejected_len, option, vlen + 2);
+            rejected_len += vlen + 2;
+        }
+    }
+    if (rejected_len) {
+        memcpy(reply, rejected, rejected_len);
+        *reply_len = rejected_len;
+        return CP_CONF_REJ;
+    }
+    if (naked_len) {
+        memcpy(reply, naked, naked_len);
+        *reply_len = naked_len;
+        return CP_CONF_NAK;
+    }
+    peer_mru = mru;
+    auth_protocol = auth;
+    return CP_CONF_ACK;
+}
+
+static struct cp lcp = {PPP_LCP, "LCP", 0, 0, 0, 0, 0, lcp_build, lcp_adjust, lcp_check};
+
+// IPCP: we ask for an address and two DNS servers (RFC 1877).
+
+static struct in_addr local_ip, remote_ip, dns_ip[2];
+static int ipcp_send_dns[2] = {1, 1};
+static int ipcp_address_rejected;
+static const uint8_t dns_option[2] = {129, 131};
+
+static size_t ipcp_build(uint8_t *p) {
+    size_t n = put_option(p, 3, &local_ip, 4);
+    for (int i = 0; i < 2; i++)
+        if (ipcp_send_dns[i]) n += put_option(p + n, dns_option[i], &dns_ip[i], 4);
+    return n;
+}
+
+static void ipcp_adjust(uint8_t code, const uint8_t *options, size_t len) {
+    const uint8_t *cursor = options, *option, *value;
+    uint8_t type;
+    size_t vlen;
+    while (next_option(&cursor, options + len, &option, &type, &value, &vlen)) {
+        struct in_addr *target = type == 3 ? &local_ip : type == 129 ? &dns_ip[0] : type == 131 ? &dns_ip[1] : NULL;
+        if (!target) continue;
+        if (code == CP_CONF_NAK && vlen == 4) {
+            memcpy(target, value, 4);
+        } else if (code == CP_CONF_REJ) {
+            if (type == 3) ipcp_address_rejected = 1;
+            else ipcp_send_dns[type == 129 ? 0 : 1] = 0;
+        }
+    }
+}
+
+static uint8_t ipcp_check(const uint8_t *options, size_t len, uint8_t *reply, size_t *reply_len) {
+    struct in_addr address = {0};
+    const uint8_t *cursor = options, *option, *value;
+    uint8_t type;
+    size_t vlen;
+    *reply_len = 0;
+    while (next_option(&cursor, options + len, &option, &type, &value, &vlen)) {
+        if (type == 3 && vlen == 4) {
+            memcpy(&address, value, 4);
+        } else {
+            memcpy(reply + *reply_len, option, vlen + 2);
+            *reply_len += vlen + 2;
+        }
+    }
+    if (*reply_len) return CP_CONF_REJ;
+    remote_ip = address;
+    return CP_CONF_ACK;
+}
+
+static struct cp ipcp = {PPP_IPCP, "IPCP", 0, 0, 0, 0, 0, ipcp_build, ipcp_adjust, ipcp_check};
+
+// MARK: Authentication (PAP RFC 1334, CHAP-MD5 RFC 1994)
+
+static uint8_t pap_id;
+static int pap_sent;
+static double auth_retry_at;
+
+static void pap_send(void) {
+    uint8_t data[2 + sizeof username + sizeof password];
+    size_t ulen = strlen(username), plen = strlen(password), n = 0;
+    data[n++] = (uint8_t)ulen;
+    memcpy(data + n, username, ulen);
+    n += ulen;
+    data[n++] = (uint8_t)plen;
+    memcpy(data + n, password, plen);
+    n += plen;
+    send_cp(PPP_PAP, 1, ++pap_id, data, n);
+    memset(data, 0, sizeof data);
+    pap_sent++;
+    auth_retry_at = now_seconds() + RESTART_SECONDS;
+}
+
+static void chap_respond(uint8_t id, const uint8_t *challenge, size_t len) {
+    uint8_t digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5_CTX md5;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations" // MD5 is what CHAP specifies
+    CC_MD5_Init(&md5);
+    CC_MD5_Update(&md5, &id, 1);
+    CC_MD5_Update(&md5, password, (CC_LONG)strlen(password));
+    CC_MD5_Update(&md5, challenge, (CC_LONG)len);
+    CC_MD5_Final(digest, &md5);
+#pragma clang diagnostic pop
+    uint8_t data[1 + sizeof digest + sizeof username];
+    size_t ulen = strlen(username);
+    data[0] = sizeof digest;
+    memcpy(data + 1, digest, sizeof digest);
+    memcpy(data + 1 + sizeof digest, username, ulen);
+    send_cp(PPP_CHAP, 2, id, data, 1 + sizeof digest + ulen);
+}
+
+// MARK: utun
+
+static int utun_fd = -1;
+static char utun_name[IFNAMSIZ];
+
+static int open_utun(void) {
+    int fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+    if (fd < 0) return -1;
+    struct ctl_info info;
+    memset(&info, 0, sizeof info);
+    strlcpy(info.ctl_name, UTUN_CONTROL_NAME, sizeof info.ctl_name);
+    if (ioctl(fd, CTLIOCGINFO, &info) < 0) {
+        close(fd);
+        return -1;
+    }
+    struct sockaddr_ctl addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sc_len = sizeof addr;
+    addr.sc_family = AF_SYSTEM;
+    addr.ss_sysaddr = AF_SYS_CONTROL;
+    addr.sc_id = info.ctl_id;
+    addr.sc_unit = 0; // first free utun<N>
+    socklen_t name_len = sizeof utun_name;
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0 ||
+        getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, utun_name, &name_len) < 0) {
+        close(fd);
+        return -1;
+    }
+    // Room for bursts at gigabit rates (about 8 ms at 1 Gbit/s) without
+    // queueing so much that latency under load grows.
+    int size = 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
+    return fd;
+}
+
+static void set_sin(struct sockaddr *sa, struct in_addr address) {
+    struct sockaddr_in *sin = (struct sockaddr_in *)sa;
+    memset(sin, 0, sizeof *sin);
+    sin->sin_len = sizeof *sin;
+    sin->sin_family = AF_INET;
+    sin->sin_addr = address;
+}
+
+/// Point-to-point address, MTU and up, like pppd does for ppp<N>.
+static int configure_utun(int mtu) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return -1;
+    struct ifaliasreq ifra;
+    memset(&ifra, 0, sizeof ifra);
+    strlcpy(ifra.ifra_name, utun_name, sizeof ifra.ifra_name);
+    set_sin(&ifra.ifra_addr, local_ip);
+    set_sin(&ifra.ifra_broadaddr, remote_ip);
+    set_sin(&ifra.ifra_mask, (struct in_addr){htonl(0xffffffff)});
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof ifr);
+    strlcpy(ifr.ifr_name, utun_name, sizeof ifr.ifr_name);
+    const char *step = NULL;
+    if (ioctl(s, SIOCAIFADDR, &ifra) < 0) step = "indirizzo";
+    ifr.ifr_mtu = mtu;
+    if (!step && ioctl(s, SIOCSIFMTU, &ifr) < 0) step = "MTU";
+    if (!step && ioctl(s, SIOCGIFFLAGS, &ifr) < 0) step = "stato";
+    ifr.ifr_flags |= IFF_UP;
+    if (!step && ioctl(s, SIOCSIFFLAGS, &ifr) < 0) step = "attivazione";
+    if (step) logmsg("configurazione di %s (%s): %s", utun_name, step, strerror(errno));
+    close(s);
+    return step ? -1 : 0;
+}
+
+// MARK: Data plane
+
+// Counters for the end-of-session statistics. The uplink ones are written by
+// the uplink thread.
+static uint64_t down_packets, down_errors;
+static _Atomic uint64_t up_packets, up_retries, up_dropped;
+static _Atomic int up_last_errno;
+
+#define SEND_RETRIES 200
+#define SEND_RETRY_MICROSECONDS 50
+
+/// Writes a data frame, waiting while the interface queue is full: dropping
+/// it would look like congestion loss to TCP, waiting slows the sender down
+/// through utun's own queue instead.
+static void send_data_frame(const uint8_t *frame, size_t len) {
+    for (int attempt = 0;; attempt++) {
+        if (write(bpf_fd, frame, len) == (ssize_t)len) {
+            atomic_fetch_add_explicit(&up_packets, 1, memory_order_relaxed);
+            return;
+        }
+        int error = errno;
+        if ((error != ENOBUFS && error != EAGAIN && error != EINTR) || attempt >= SEND_RETRIES) {
+            atomic_store_explicit(&up_last_errno, error, memory_order_relaxed);
+            atomic_fetch_add_explicit(&up_dropped, 1, memory_order_relaxed);
+            return;
+        }
+        atomic_fetch_add_explicit(&up_retries, 1, memory_order_relaxed);
+        usleep(SEND_RETRY_MICROSECONDS);
+    }
+}
+
+/// Wire -> utun, on the main thread: the 4 bytes before the IP header (PPPoE
+/// length and PPP protocol) are overwritten in the BPF buffer with utun's
+/// address family header, so each packet is a single write and no copy.
+static void deliver_ip(const struct pppoe_frame *f) {
+    uint8_t *p = (uint8_t *)f->payload - 2;
+    size_t len = f->payload_len - 2u + 4;
+    p[0] = p[1] = p[2] = 0;
+    p[3] = AF_INET;
+    if (write(utun_fd, p, len) == (ssize_t)len) down_packets++;
+    else down_errors++;
+}
+
+/// utun -> wire: the packet is read right after the room for the Ethernet,
+/// VLAN, PPPoE and PPP headers, which are then written in front of it.
+static void *uplink(void *arg) {
+    (void)arg;
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    size_t header = l2_header_len() + 6 + 2;
+    uint8_t frame[MAX_FRAME + 64];
     for (;;) {
-        if (stop_requested) return EXIT_OK;
+        ssize_t n = read(utun_fd, frame + header - 4, MAX_FRAME);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            logmsg("lettura da %s: %s", utun_name, strerror(errno));
+            return NULL;
+        }
+        if (n <= 4 || frame[header - 1] != AF_INET) continue; // IPv6 is not negotiated
+        size_t ip_len = (size_t)n - 4;
+        if (ip_len + 2 > MAX_PPP_PAYLOAD) continue;
+        build_header(frame, ac_mac, ETHERTYPE_SESS, CODE_SESS, session_id, (uint16_t)(ip_len + 2));
+        frame[header - 2] = PPP_IP >> 8;
+        frame[header - 1] = PPP_IP & 0xff;
+        size_t len = header + ip_len;
+        if (len < 60) {
+            memset(frame + len, 0, 60 - len);
+            len = 60;
+        }
+        send_data_frame(frame, len);
+    }
+}
+
+// MARK: Session
+
+enum phase { PHASE_LCP, PHASE_AUTH, PHASE_NETWORK, PHASE_RUNNING, PHASE_TERMINATE };
+
+static enum phase phase = PHASE_LCP;
+static int exit_status = -1;
+static int padt_received;
+static uint8_t lcp_reject_id, echo_id;
+static int echo_pending;
+static double next_echo, terminate_at;
+
+static void fail(int status) {
+    if (exit_status < 0) exit_status = status;
+}
+
+static void start_network(void) {
+    phase = PHASE_NETWORK;
+    cp_start(&ipcp);
+}
+
+static void ipcp_opened(void) {
+    char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN], dns[2][INET_ADDRSTRLEN];
+    if (ipcp_address_rejected || local_ip.s_addr == 0) {
+        logmsg("il server non ha assegnato un indirizzo IPv4");
+        fail(EXIT_NEGOTIATION);
+        return;
+    }
+    // Same placeholder pppd uses when the peer does not tell its address.
+    if (remote_ip.s_addr == 0) remote_ip.s_addr = htonl(0x0a404040);
+    int mtu = peer_mru < OUR_MRU ? peer_mru : OUR_MRU;
+
+    utun_fd = open_utun();
+    if (utun_fd < 0) {
+        logmsg("impossibile creare l'interfaccia utun: %s", strerror(errno));
+        fail(EXIT_SYSTEM);
+        return;
+    }
+    if (configure_utun(mtu) < 0) {
+        fail(EXIT_SYSTEM);
+        return;
+    }
+
+    // The uplink thread must not take the signals meant to stop the session.
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, &old);
+    pthread_t thread;
+    int error = pthread_create(&thread, NULL, uplink, NULL);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    if (error) {
+        logmsg("thread di invio: %s", strerror(error));
+        fail(EXIT_SYSTEM);
+        return;
+    }
+    pthread_detach(thread);
+
+    inet_ntop(AF_INET, &local_ip, local, sizeof local);
+    inet_ntop(AF_INET, &remote_ip, remote, sizeof remote);
+    logmsg("STATUS interface %s mtu=%d", utun_name, mtu);
+    logmsg("STATUS local %s", local);
+    logmsg("STATUS remote %s", remote);
+    char dns_list[2 * INET_ADDRSTRLEN + 1] = "";
+    for (int i = 0; i < 2; i++) {
+        if (!ipcp_send_dns[i] || dns_ip[i].s_addr == 0) continue;
+        inet_ntop(AF_INET, &dns_ip[i], dns[i], sizeof dns[i]);
+        logmsg("STATUS dns %s", dns[i]);
+        if (dns_list[0]) strlcat(dns_list, ",", sizeof dns_list);
+        strlcat(dns_list, dns[i], sizeof dns_list);
+    }
+    // One line with everything, for the root supervisor.
+    logmsg("STATUS up %s local=%s remote=%s dns=%s", utun_name, local, remote, dns_list);
+    phase = PHASE_RUNNING;
+    next_echo = now_seconds() + ECHO_INTERVAL;
+}
+
+static void lcp_opened(void) {
+    logmsg("LCP aperto: MRU del server %u, autenticazione %s", peer_mru,
+           auth_protocol == PPP_PAP ? "PAP" : auth_protocol == PPP_CHAP ? "CHAP" : "nessuna");
+    if (auth_protocol == PPP_PAP) {
+        logmsg("STATUS auth PAP");
+        phase = PHASE_AUTH;
+        pap_send();
+    } else if (auth_protocol == PPP_CHAP) {
+        logmsg("STATUS auth CHAP");
+        phase = PHASE_AUTH;
+        auth_retry_at = now_seconds() + CHAP_WAIT_SECONDS;
+    } else {
+        start_network();
+    }
+}
+
+static void authenticated(void) {
+    logmsg("STATUS auth-ok");
+    start_network();
+}
+
+static void auth_failed(const uint8_t *message, size_t len) {
+    char text[256];
+    tag_string(message, (uint16_t)(len < 255 ? len : 255), text, sizeof text);
+    logmsg("STATUS auth-failed %s", text);
+    fail(EXIT_AUTH);
+}
+
+static void begin_terminate(void) {
+    phase = PHASE_TERMINATE;
+    terminate_at = now_seconds() + TERMINATE_SECONDS;
+    if (cp_is_open(&lcp)) {
+        static const char reason[] = "User request";
+        send_cp(PPP_LCP, CP_TERM_REQ, ++lcp_reject_id, (const uint8_t *)reason, sizeof reason - 1);
+    } else {
+        fail(EXIT_USER);
+    }
+}
+
+static void lcp_input(const uint8_t *packet, size_t len) {
+    switch (cp_input(&lcp, packet, len)) {
+    case CP_OPENED:
+        lcp_opened();
+        return;
+    case CP_RENEGOTIATE:
+        logmsg("il server ha rinegoziato LCP: sessione chiusa");
+        fail(EXIT_HANGUP);
+        return;
+    case CP_TERMINATED:
+        if (phase == PHASE_TERMINATE) {
+            fail(EXIT_USER);
+        } else {
+            logmsg("STATUS lcp-terminated dal server");
+            fail(EXIT_HANGUP);
+        }
+        return;
+    case CP_OTHER:
+        break;
+    default:
+        return;
+    }
+    uint8_t code = packet[0], id = packet[1];
+    size_t total = (size_t)(packet[2] << 8 | packet[3]);
+    const uint8_t *data = packet + 4;
+    size_t data_len = total - 4;
+    switch (code) {
+    case CP_TERM_ACK:
+        if (phase == PHASE_TERMINATE) fail(EXIT_USER);
+        break;
+    case CP_ECHO_REQ:
+        if (cp_is_open(&lcp) && data_len >= 4) {
+            uint8_t reply[MAX_FRAME];
+            uint32_t magic = htonl(our_magic);
+            memcpy(reply, &magic, 4);
+            memcpy(reply + 4, data + 4, data_len - 4);
+            send_cp(PPP_LCP, CP_ECHO_REP, id, reply, data_len);
+        }
+        break;
+    case CP_ECHO_REP:
+        echo_pending = 0;
+        break;
+    case CP_PROT_REJ:
+        if (data_len >= 2 && (data[0] << 8 | data[1]) == PPP_IPCP) {
+            logmsg("il server ha rifiutato IPCP");
+            fail(EXIT_NEGOTIATION);
+        }
+        break;
+    case CP_CODE_REJ:
+        logmsg("il server ha rifiutato un codice LCP");
+        break;
+    }
+}
+
+static void auth_input(uint16_t protocol, const uint8_t *packet, size_t len) {
+    if (len < 4 || phase < PHASE_AUTH || phase == PHASE_TERMINATE) return;
+    uint8_t code = packet[0], id = packet[1];
+    size_t total = (size_t)(packet[2] << 8 | packet[3]);
+    if (total < 4 || total > len) return;
+    const uint8_t *data = packet + 4;
+    size_t data_len = total - 4;
+
+    if (protocol == PPP_PAP) {
+        if (phase != PHASE_AUTH || id != pap_id) return;
+        const uint8_t *message = data_len ? data + 1 : data;
+        size_t message_len = data_len ? (data[0] < data_len ? data[0] : data_len - 1) : 0;
+        if (code == 2) authenticated();
+        if (code == 3) auth_failed(message, message_len);
+        return;
+    }
+    // CHAP: the server may challenge again at any time.
+    if (code == 1 && data_len >= 1 && data[0] <= data_len - 1) {
+        chap_respond(id, data + 1, data[0]);
+    } else if (code == 3 && phase == PHASE_AUTH) {
+        authenticated();
+    } else if (code == 4) {
+        auth_failed(data, data_len);
+    }
+}
+
+static void protocol_reject(uint16_t protocol, const uint8_t *packet, size_t len) {
+    if (!cp_is_open(&lcp)) return;
+    uint8_t data[MAX_FRAME];
+    size_t n = len < MAX_PPP_PAYLOAD - 2 - 4 - 2 ? len : MAX_PPP_PAYLOAD - 2 - 4 - 2;
+    data[0] = protocol >> 8;
+    data[1] = protocol & 0xff;
+    memcpy(data + 2, packet, n);
+    send_cp(PPP_LCP, CP_PROT_REJ, ++lcp_reject_id, data, n + 2);
+}
+
+static void session_frame(const struct pppoe_frame *f) {
+    if (memcmp(f->src, ac_mac, 6) != 0 || f->session != session_id) return;
+    if (f->ethertype == ETHERTYPE_DISC) {
+        if (f->code == CODE_PADT) {
+            padt_received = 1;
+            logmsg("STATUS padt sessione chiusa dal concentratore");
+            fail(EXIT_HANGUP);
+        }
+        return;
+    }
+    if (f->code != CODE_SESS || f->payload_len < 2) return;
+    uint16_t protocol = (uint16_t)(f->payload[0] << 8 | f->payload[1]);
+    if (protocol == PPP_IP) {
+        if (phase == PHASE_RUNNING) deliver_ip(f);
+        return;
+    }
+    const uint8_t *packet = f->payload + 2;
+    size_t len = f->payload_len - 2u;
+    switch (protocol) {
+    case PPP_LCP: lcp_input(packet, len); break;
+    case PPP_PAP:
+    case PPP_CHAP: auth_input(protocol, packet, len); break;
+    case PPP_IPCP:
+        if (phase == PHASE_NETWORK || phase == PHASE_RUNNING) {
+            int r = cp_input(&ipcp, packet, len);
+            if (r == CP_OPENED) ipcp_opened();
+            if (r == CP_RENEGOTIATE || r == CP_TERMINATED) {
+                logmsg("il server ha chiuso o rinegoziato IPCP");
+                fail(EXIT_HANGUP);
+            }
+        }
+        break;
+    default: protocol_reject(protocol, packet, len); break; // IPv6CP, CCP...
+    }
+}
+
+static void run_timers(double now) {
+    if (phase == PHASE_TERMINATE) {
+        if (now >= terminate_at) fail(EXIT_USER);
+        return;
+    }
+    struct cp *cp = phase == PHASE_LCP ? &lcp : phase == PHASE_NETWORK ? &ipcp : NULL;
+    if (cp && cp->retry_at && now >= cp->retry_at) {
+        if (cp->sent >= MAX_CONFIGURE) {
+            logmsg("nessuna risposta alle richieste %s", cp->name);
+            fail(EXIT_NEGOTIATION);
+            return;
+        }
+        cp_send_request(cp);
+    }
+    if (phase == PHASE_AUTH && now >= auth_retry_at) {
+        if (auth_protocol == PPP_CHAP || pap_sent >= MAX_CONFIGURE) {
+            logmsg("STATUS auth-failed nessuna risposta dal server");
+            fail(EXIT_AUTH);
+            return;
+        }
+        pap_send();
+    }
+    if (phase == PHASE_RUNNING && now >= next_echo) {
+        if (echo_pending >= ECHO_FAILURES) {
+            logmsg("STATUS echo-timeout nessuna risposta a %d LCP echo", ECHO_FAILURES);
+            fail(EXIT_PEER_DEAD);
+            return;
+        }
+        uint32_t magic = htonl(our_magic);
+        send_cp(PPP_LCP, CP_ECHO_REQ, ++echo_id, (const uint8_t *)&magic, 4);
+        echo_pending++;
+        next_echo = now + ECHO_INTERVAL;
+    }
+}
+
+static int run_session(void) {
+    our_magic = arc4random();
+    cp_start(&lcp);
+    while (exit_status < 0) {
+        if (stop_requested && phase != PHASE_TERMINATE) begin_terminate();
+        run_timers(now_seconds());
+        if (exit_status >= 0) break;
+
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(bpf_fd, &rfds);
-        FD_SET(STDIN_FILENO, &rfds);
-        int maxfd = bpf_fd > STDIN_FILENO ? bpf_fd : STDIN_FILENO;
-        int r = select(maxfd + 1, &rfds, NULL, NULL, NULL);
+        struct timeval tv = {0, 200000};
+        int r = select(bpf_fd + 1, &rfds, NULL, NULL, &tv);
         if (r < 0) {
             if (errno == EINTR) continue;
             return EXIT_SYSTEM;
         }
-        if (FD_ISSET(STDIN_FILENO, &rfds)) {
-            ssize_t n = read(STDIN_FILENO, in, sizeof in);
-            if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
-                logmsg("pppd ha chiuso il collegamento");
-                return EXIT_OK;
-            }
-            if (n > 0) hdlc_input(&decoder, in, (size_t)n);
+        if (r == 0) continue;
+        ssize_t n = read(bpf_fd, bpf_buf, bpf_buf_len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            logmsg("lettura BPF: %s", strerror(errno));
+            return EXIT_SYSTEM;
         }
-        if (FD_ISSET(bpf_fd, &rfds)) {
-            ssize_t n = read(bpf_fd, bpf_buf, bpf_buf_len);
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                logmsg("lettura BPF: %s", strerror(errno));
-                return EXIT_SYSTEM;
-            }
-            for (uint8_t *p = bpf_buf; p < bpf_buf + n;) {
-                struct bpf_hdr *h = (struct bpf_hdr *)p;
-                struct pppoe_frame f;
-                if (parse_frame(p + h->bh_hdrlen, h->bh_caplen, &f) == 0 && handle_session(&f, &ctx) < 0)
-                    return EXIT_SYSTEM;
-                if (ctx.padt) {
-                    flush_to_pppd();
-                    logmsg("STATUS padt sessione chiusa dal concentratore");
-                    return EXIT_PADT;
-                }
-                p += BPF_WORDALIGN(h->bh_hdrlen + h->bh_caplen);
-            }
-            if (flush_to_pppd() < 0) return EXIT_SYSTEM;
+        for (uint8_t *p = bpf_buf; p < bpf_buf + n && exit_status < 0;) {
+            struct bpf_hdr *h = (struct bpf_hdr *)p;
+            struct pppoe_frame f;
+            if (parse_frame(p + h->bh_hdrlen, h->bh_caplen, &f) == 0) session_frame(&f);
+            p += BPF_WORDALIGN(h->bh_hdrlen + h->bh_caplen);
         }
     }
+    return exit_status;
+}
+
+// MARK: Statistics
+
+struct link_counters {
+    uint32_t output_errors;
+    uint32_t input_drops;
+};
+
+static int read_link_counters(const char *ifname, struct link_counters *out) {
+    struct ifaddrs *list, *ifa;
+    if (getifaddrs(&list) != 0) return -1;
+    int found = -1;
+    for (ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_LINK || !ifa->ifa_data) continue;
+        if (strcmp(ifa->ifa_name, ifname) != 0) continue;
+        const struct if_data *data = ifa->ifa_data;
+        out->output_errors = data->ifi_oerrors;
+        out->input_drops = data->ifi_iqdrops;
+        found = 0;
+        break;
+    }
+    freeifaddrs(list);
+    return found;
+}
+
+static struct link_counters wire_at_start;
+static int wire_at_start_valid;
+
+/// One STATUS line the app shows in its log: where packets were lost, if any.
+static void log_statistics(void) {
+    char line[512];
+    int n = snprintf(line, sizeof line, "STATUS stats ricevuti %llu, inviati %llu",
+                     (unsigned long long)down_packets,
+                     (unsigned long long)atomic_load(&up_packets));
+    if (down_errors) n += snprintf(line + n, sizeof line - (size_t)n, ", consegna a %s fallita %llu", utun_name,
+                                   (unsigned long long)down_errors);
+    n += snprintf(line + n, sizeof line - (size_t)n, "; invio: coda piena %llu volte, scartati %llu",
+                  (unsigned long long)atomic_load(&up_retries), (unsigned long long)atomic_load(&up_dropped));
+    int error = atomic_load(&up_last_errno);
+    if (error) n += snprintf(line + n, sizeof line - (size_t)n, " (%s)", strerror(error));
+    struct bpf_stat bpf;
+    if (ioctl(bpf_fd, BIOCGSTATS, &bpf) == 0)
+        n += snprintf(line + n, sizeof line - (size_t)n, "; BPF persi %u", bpf.bs_drop);
+    struct link_counters wire, tun;
+    if (wire_at_start_valid && read_link_counters(opt_ifname, &wire) == 0)
+        n += snprintf(line + n, sizeof line - (size_t)n, "; %s errori in uscita %u, scarti in ingresso %u", opt_ifname,
+                      wire.output_errors - wire_at_start.output_errors, wire.input_drops - wire_at_start.input_drops);
+    if (utun_fd >= 0 && read_link_counters(utun_name, &tun) == 0)
+        snprintf(line + n, sizeof line - (size_t)n, "; %s errori in uscita %u", utun_name, tun.output_errors);
+    logmsg("%s", line);
 }
 
 // MARK: Main
 
 static void usage(void) {
     fprintf(stderr,
-            "uso: pppoe-relay -I <interfaccia> [-V <vlan>] [-P <pcp>] [-S <service>] [-C <ac-name>]\n"
-            "                 [-T <secondi>] [-L <logfile>] [-D]\n"
+            "uso: pppoe-relay -I <interfaccia> -A <credenziali> [-V <vlan>] [-P <pcp>] [-S <service>]\n"
+            "                 [-C <ac-name>] [-T <secondi>] [-L <logfile>]\n"
+            "     pppoe-relay -I <interfaccia> -D [-V <vlan>] ...\n"
+            "  -A  file con le righe: user \"nome\" / password \"segreto\"\n"
             "  -V  VLAN ID 1-4094 (omesso: senza tag)\n"
             "  -D  solo discovery: mostra i concentratori che rispondono ed esce\n");
 }
 
 int main(int argc, char **argv) {
     int ch;
-    while ((ch = getopt(argc, argv, "I:V:P:S:C:T:L:Dh")) != -1) {
+    while ((ch = getopt(argc, argv, "I:A:V:P:S:C:T:L:Dh")) != -1) {
         switch (ch) {
         case 'I': opt_ifname = optarg; break;
+        case 'A': opt_secret = optarg; break;
         case 'V': opt_vlan = atoi(optarg); break;
         case 'P': opt_pcp = atoi(optarg); break;
         case 'S': opt_service = optarg; break;
@@ -739,14 +1417,15 @@ int main(int argc, char **argv) {
         case 'T': opt_timeout = atoi(optarg); break;
         case 'L': log_file = fopen(optarg, "a"); break;
         case 'D': opt_discovery_only = 1; break;
-        default: usage(); return EXIT_SYSTEM;
+        default: usage(); return EXIT_OPTIONS;
         }
     }
-    if (!opt_ifname || (opt_vlan != -1 && (opt_vlan < 1 || opt_vlan > 4094)) || opt_pcp < 0 || opt_pcp > 7 ||
-        opt_timeout < 1) {
+    if (!opt_ifname || (!opt_secret && !opt_discovery_only) || (opt_vlan != -1 && (opt_vlan < 1 || opt_vlan > 4094)) ||
+        opt_pcp < 0 || opt_pcp > 7 || opt_timeout < 1) {
         usage();
-        return EXIT_SYSTEM;
+        return EXIT_OPTIONS;
     }
+    if (opt_secret && read_secret(opt_secret) != 0) return EXIT_OPTIONS;
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -765,22 +1444,19 @@ int main(int argc, char **argv) {
     uint32_t uniq = arc4random();
     memcpy(host_uniq, &uniq, sizeof host_uniq);
 
-    int result = discover();
-    if (result != EXIT_OK || opt_discovery_only || stop_requested) return result;
+    // Keep the data path on the performance cores.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 
-    if (isatty(STDIN_FILENO)) {
-        struct termios tio;
-        if (tcgetattr(STDIN_FILENO, &tio) == 0) {
-            cfmakeraw(&tio);
-            tcsetattr(STDIN_FILENO, TCSANOW, &tio);
-        }
-    }
-    init_fcs();
-    init_escape_table();
-    result = relay();
-    if (result != EXIT_PADT) {
+    int result = discover();
+    if (result != EXIT_OK || opt_discovery_only || session_id == 0) return result;
+    wire_at_start_valid = read_link_counters(opt_ifname, &wire_at_start) == 0;
+    if (!stop_requested) result = run_session();
+    else result = EXIT_USER;
+
+    if (!padt_received) {
         send_discovery(CODE_PADT, ac_mac, session_id);
         logmsg("STATUS padt inviato, sessione %u chiusa", session_id);
     }
+    log_statistics();
     return result;
 }

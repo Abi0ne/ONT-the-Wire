@@ -21,9 +21,9 @@ public enum PrivilegedSessionError: Error, LocalizedError, Equatable {
 }
 
 /// Runs one PPPoE session as root: the `RootBroker` starts `ont-session.sh`,
-/// which runs pppd with pppoe-relay as its transport. The app follows the
-/// session by reading the log files in a private session folder, and stops it
-/// by creating a `stop` file there.
+/// which runs pppoe-relay (PPPoE and PPP over a utun interface). The app
+/// follows the session by reading the relay log in a private session folder,
+/// and stops it by creating a `stop` file there.
 @MainActor
 public final class PrivilegedSession {
     public struct Parameters: Sendable {
@@ -43,7 +43,7 @@ public final class PrivilegedSession {
     }
 
     public var onEvent: ((SessionEvent) -> Void)?
-    /// Called once when the root supervisor has finished, with pppd's exit status.
+    /// Called once when the root supervisor has finished, with the relay's exit status.
     public var onExit: ((Int?) -> Void)?
 
     public private(set) var isRunning = false
@@ -74,7 +74,7 @@ public final class PrivilegedSession {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         let secret = dir.appendingPathComponent("secret")
-        let contents = "user \(Self.pppdQuoted(parameters.username))\npassword \(Self.pppdQuoted(parameters.password))\n"
+        let contents = "user \(Self.secretQuoted(parameters.username))\npassword \(Self.secretQuoted(parameters.password))\n"
         guard FileManager.default.createFile(atPath: secret.path, contents: Data(contents.utf8),
                                              attributes: [.posixPermissions: 0o600]) else {
             try? FileManager.default.removeItem(at: dir)
@@ -121,9 +121,6 @@ public final class PrivilegedSession {
         guard let directory else { return }
         for line in readNewLines("relay.log", in: directory) {
             if let event = SessionLogParser.parseRelayLine(line) { onEvent?(event) }
-        }
-        for line in readNewLines("pppd.log", in: directory) {
-            if let event = SessionLogParser.parsePPPDLine(line) { onEvent?(event) }
         }
         let exitFile = directory.appendingPathComponent("exit")
         if let text = try? String(contentsOf: exitFile, encoding: .utf8) {
@@ -178,8 +175,8 @@ public final class PrivilegedSession {
         throw PrivilegedSessionError.componentMissing(name)
     }
 
-    /// Quotes a value for a pppd options file.
-    nonisolated static func pppdQuoted(_ value: String) -> String {
+    /// Quotes a value for the secret file (pppd options syntax, read by pppoe-relay).
+    nonisolated static func secretQuoted(_ value: String) -> String {
         let escaped = value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")

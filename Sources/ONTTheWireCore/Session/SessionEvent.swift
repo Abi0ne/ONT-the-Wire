@@ -1,7 +1,7 @@
 import Foundation
 
 /// Something that happened during a PPPoE session, decoded from the log lines
-/// written by pppoe-relay, pppd and the root supervisor.
+/// written by pppoe-relay and the root supervisor.
 public enum SessionEvent: Equatable, Sendable {
     case discoveryStarted(interface: String, mac: String, vlan: Int?)
     case serverOffered(mac: String, acName: String)
@@ -19,15 +19,14 @@ public enum SessionEvent: Equatable, Sendable {
     case primaryPublished
     case echoTimeout
     case peerTerminated
-    case terminated
+    /// Packet counters at the end of the session, already worded for the log.
+    case statistics(String)
     /// The root supervisor never started; carries its own log, if any.
     case supervisorFailed(String)
 }
 
-/// Turns relay and pppd log lines into `SessionEvent`s.
-///
-/// relay.log lines look like `11:20:43 pppoe-relay: STATUS pado <mac> ac="X" service=""`;
-/// pppd.log lines like `Thu Oct 15 11:20:47 2026 : CHAP authentication failed`.
+/// Turns relay.log lines into `SessionEvent`s. They look like
+/// `11:20:43 pppoe-relay: STATUS pado <mac> ac="X" service=""`.
 public enum SessionLogParser {
     public static func parseRelayLine(_ line: String) -> SessionEvent? {
         guard let range = line.range(of: "STATUS ") else { return nil }
@@ -53,35 +52,29 @@ public enum SessionLogParser {
             return .serverClosedSession
         case "primary":
             return .primaryPublished
+        case "auth" where words.count >= 2:
+            return .authenticating(method: words[1])
+        case "auth-ok":
+            return .authenticated
+        case "auth-failed":
+            return .authenticationFailed
+        case "interface" where words.count >= 2:
+            return .linkInterface(words[1])
+        case "local" where words.count >= 2:
+            return .localAddress(words[1])
+        case "remote" where words.count >= 2:
+            return .remoteAddress(words[1])
+        case "dns" where words.count >= 2:
+            return .dnsServer(words[1])
+        case "echo-timeout":
+            return .echoTimeout
+        case "lcp-terminated":
+            return .peerTerminated
+        case "stats" where words.count >= 2:
+            return .statistics(words.dropFirst().joined(separator: " "))
         default:
             return nil
         }
-    }
-
-    public static func parsePPPDLine(_ line: String) -> SessionEvent? {
-        // Relay stderr is mirrored into pppd.log; it is read from relay.log instead.
-        if line.hasPrefix("pppoe-relay:") { return nil }
-        let message: Substring
-        if let range = line.range(of: " : ") {
-            message = line[range.upperBound...]
-        } else {
-            message = Substring(line)
-        }
-
-        if let name = message.firstMatch(of: #/^Using interface (ppp\d+)/#) {
-            return .linkInterface(String(name.1))
-        }
-        if message.hasPrefix("rcvd [CHAP Challenge") { return .authenticating(method: "CHAP") }
-        if message.hasPrefix("sent [PAP AuthReq") { return .authenticating(method: "PAP") }
-        if message.firstMatch(of: #/^(CHAP|PAP) authentication succeeded/#) != nil { return .authenticated }
-        if message.firstMatch(of: #/^(CHAP|PAP) authentication failed/#) != nil { return .authenticationFailed }
-        if let m = message.firstMatch(of: #/^local +IP address (\S+)/#) { return .localAddress(String(m.1)) }
-        if let m = message.firstMatch(of: #/^remote +IP address (\S+)/#) { return .remoteAddress(String(m.1)) }
-        if let m = message.firstMatch(of: #/^(?:primary|secondary) +DNS address (\S+)/#) { return .dnsServer(String(m.1)) }
-        if message.hasPrefix("No response to") && message.contains("echo-requests") { return .echoTimeout }
-        if message.hasPrefix("LCP terminated by peer") { return .peerTerminated }
-        if message.hasPrefix("Connection terminated") { return .terminated }
-        return nil
     }
 
     private static func value(of key: String, in words: [String]) -> String? {
