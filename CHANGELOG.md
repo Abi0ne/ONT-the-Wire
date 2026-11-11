@@ -1,5 +1,11 @@
 # Novità
 
+## 0.3.1 — 11 novembre 2026
+
+- **PPPoE su più core**: il traffico della sessione è diviso per connessione su più thread per direzione (4 sui Mac con almeno 5 core ad alte prestazioni), così nessun thread dell'app fa da collo di bottiglia sulle linee a 2,5 Gbit/s.
+- **Download più leggero per il sistema**: i segmenti TCP ricevuti vengono uniti in pacchetti grandi prima di passarli a macOS, che su `utun` li elabora uno alla volta in un solo thread: era quello il punto più carico del percorso. Su una linea 2500/1000 il download con 8 flussi è passato da circa 1,6 a 2,0 Gbit/s (nella stessa prova è cambiato anche l'adattatore Ethernet).
+- Le statistiche a fine sessione nel Log riportano anche il carico massimo di ogni thread e quanti segmenti sono stati uniti.
+
 ## 0.3.0 — 9 novembre 2026
 
 - **PPPoE molto più veloce**: l'app gestisce da sé il protocollo PPP (LCP, PAP/CHAP, IPCP) e porta il traffico su un'interfaccia `utun`, senza più `pppd`. Prima il passaggio dei dati attraverso un pty limitava la sessione a circa 350 Mbit/s; ora il download supera i 900 Mbit/s su una linea da 1 Gbit/s.

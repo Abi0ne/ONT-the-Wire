@@ -39,11 +39,11 @@ Client PPPoE (RFC 2516) e PPP completo.
 - **LCP** (RFC 1661): chiede MRU 1492 e un magic number; accetta dal server MRU, magic e autenticazione PAP o CHAP-MD5 (a MS-CHAP o EAP risponde con un Nak che propone CHAP-MD5). Risponde agli LCP echo e ne manda uno ogni 10 s: dopo 4 senza risposta chiude la sessione. Ai protocolli che non gestisce (IPv6CP, CCP…) risponde con Protocol-Reject.
 - **Autenticazione**: PAP (RFC 1334) o CHAP-MD5 (RFC 1994, anche le richieste ripetute durante la sessione). Credenziali dal file `-A`.
 - **IPCP** (RFC 1332, 1877): chiede indirizzo e due DNS; li prende dal Nak del server.
-- **Piano dati**: crea `utun<N>` (indirizzo punto-punto, MTU = min(1492, MRU del server)). Il thread principale legge da BPF e scrive su `utun`; un secondo thread legge da `utun` e scrive su BPF. Solo IPv4.
+- **Piano dati**: crea `utun<N>` (indirizzo punto-punto, MTU = min(1492, MRU del server)). I pacchetti sono divisi per connessione su più thread per direzione (vedi Prestazioni). Solo IPv4.
 - Su SIGTERM/SIGHUP manda LCP Terminate-Request, poi **PADT**. Su PADT ricevuto esce subito.
 - Scrive righe `STATUS …` nel suo log (`-L`), lette dall'app: `discovery`, `pado`, `session`, `timeout`, `error`, `padt`, `auth`, `auth-ok`, `auth-failed`, `interface`, `local`, `remote`, `dns`, `up` (tutto su una riga, per il supervisore), `echo-timeout`, `lcp-terminated`, `stats`.
 
-Opzioni: `-I iface`, `-A credenziali`, `-V vlan`, `-P pcp`, `-S service`, `-C ac-name`, `-T timeout`, `-L logfile`, `-D` (solo discovery, per diagnosi; non serve `-A`).
+Opzioni: `-I iface`, `-A credenziali`, `-V vlan`, `-P pcp`, `-S service`, `-C ac-name`, `-T timeout`, `-L logfile`, `-W thread` (thread del piano dati per direzione: 1, 2, 4 o 8; omesso, 4 con almeno 5 core ad alte prestazioni, 2 con almeno 3, altrimenti 1), `-G` (non unire i segmenti TCP ricevuti), `-D` (solo discovery, per diagnosi; non serve `-A`).
 
 Codici di uscita, con gli stessi valori di `pppd` per gli stessi casi: 0 ok, 1 errore di sistema, 2 opzioni, 5 chiusura richiesta, 8 nessun PADO/PADS, 10 negoziazione PPP fallita, 15 il server non risponde agli echo, 16 sessione chiusa dal server (PADT, LCP Terminate), 19 autenticazione rifiutata.
 
@@ -51,9 +51,13 @@ Codici di uscita, con gli stessi valori di `pppd` per gli stessi casi: 0 ok, 1 e
 
 - buffer BPF da 512 KB letto a blocchi;
 - verso `utun` nessuna copia: i 4 byte prima dell'header IP nel buffer BPF vengono sovrascritti con l'intestazione di `utun` e il pacchetto parte con una sola `write`; in uscita il pacchetto viene letto subito dopo lo spazio per gli header Ethernet/VLAN/PPPoE/PPP;
-- un thread per direzione, con QoS `USER_INTERACTIVE` per restare sui core ad alte prestazioni;
+- **più thread per direzione**, con QoS `USER_INTERACTIVE` per restare sui core ad alte prestazioni. Ogni pacchetto costa una chiamata di sistema per lato, e con un thread solo per direzione quel thread lavorava vicino al limite a 2 Gbit/s. Nella prova dell'11 novembre 2026 su una linea 2500/1000 i thread in più da soli non hanno cambiato le velocità (1,6–1,9 Gbit/s in download, 0,6–0,8 in upload): nessun thread del relay è più saturo e il limite è nel kernel (vedi l'unione dei segmenti). La somma delle porte TCP/UDP sceglie uno di N gruppi, lo stesso per i due sensi di una connessione, così i pacchetti di una connessione passano sempre dallo stesso thread e non cambiano ordine; frammenti e protocolli senza porte vanno nel gruppo 0.
+  - *Ricezione*: N dispositivi BPF, ognuno con un filtro nel kernel che accetta solo l'IPv4 del suo gruppo e un thread che lo scrive su `utun`. Al thread principale restano discovery e controllo PPP.
+  - *Invio*: un thread legge `utun` e passa ogni pacchetto alla coda del suo gruppo (512 pacchetti, un produttore e un consumatore); N thread scrivono le code ognuno sul proprio dispositivo BPF.
+  - Con `-W 1`, o se i dispositivi BPF in più non si aprono, resta un thread per direzione come nella 0.3.0;
+- **unione dei segmenti TCP ricevuti**. Il kernel elabora tutto ciò che arriva su `utun` in un solo thread (`dlil_input_utun<N>`), un pacchetto alla volta: in un campione di 20 s durante un test a 1,9 Gbit/s (11 novembre 2026, `spindump`) era il thread più carico del percorso, 12,5 s di CPU, mentre nessun thread del relay era saturo. I thread di ricezione uniscono quindi i segmenti consecutivi di una connessione arrivati nella stessa lettura BPF in un solo pacchetto IP fino a 64 KB, come il receive offload di una scheda di rete: il kernel elabora e conferma molti meno pacchetti. Si uniscono solo segmenti dati semplici (IPv4 senza opzioni né frammenti, solo ACK/PSH, stesse opzioni TCP a parte i timestamp, stesso TOS) con checksum IP e TCP validi; il checksum del pacchetto unito si ricava dalle somme già calcolate. Niente resta in attesa oltre la lettura, un PSH chiude subito il pacchetto e l'ordine dentro una connessione non cambia. Se `utun` rifiuta un pacchetto unito il relay consegna i segmenti originali e smette di unire; `-G` lo disattiva;
 - se la coda dell'adattatore è piena (`ENOBUFS`) il frame in uscita viene ritentato fino a circa 10 ms invece di essere scartato, così il TCP rallenta per la coda di `utun` e non per una perdita;
-- a fine sessione la riga `STATUS stats` riporta pacchetti per direzione, code piene, scarti, frame persi da BPF ed errori delle interfacce: l'app la mostra nel Log.
+- a fine sessione la riga `STATUS stats` riporta pacchetti per direzione, code piene, scarti, frame persi da BPF, errori delle interfacce e il carico massimo di ogni thread (quota di un core su circa un secondo): l'app la mostra nel Log. Un thread vicino al 100% è il punto in cui si perde velocità.
 
 ### `ont-root-helper` (C)
 
